@@ -10,15 +10,16 @@ LLM = ChatGroq(
 ).bind_tools(analysis_tools)
 
 LLM2 = ChatOpenAI(
-    model="stepfun/step-3.5-flash:free",
+    model="inclusionai/ling-2.6-1t:free",
     openai_api_key=os.environ["OPENROUTER_API_KEY"],
     openai_api_base="https://openrouter.ai/api/v1",
     temperature=0
 )
 
-LLM3 = ChatGroq(
-    model="llama-3.3-70b-versatile",
-    api_key=os.getenv("GROQ_API_KEY"),
+LLM3 = ChatOpenAI(
+    model="openrouter/owl-alpha",
+    openai_api_key=os.environ["OPENROUTER_API_KEY"],
+    openai_api_base="https://openrouter.ai/api/v1",
     temperature=0
 ).bind_tools(validator_tool)
 

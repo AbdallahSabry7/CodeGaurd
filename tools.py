@@ -12,12 +12,31 @@ from OCP_Detection_Final import get_ocp_report
 from dependancy_principle import get_dip_report
 from SRP_Detection_Final import get_srp_report
 from clean_code import analyze_code_string
+from dataclasses import dataclass
 
 
 BLOCKED_PATTERNS = [
-    'os.system', 'subprocess', 'shutil.rmtree',
-    'socket', '__import__', 'open(',
+    'os.system',
+    'subprocess',
+    'shutil.rmtree',
+    'socket.',
+    '__import__',
+    'importlib',
+    'ctypes',
+    'eval(',
+    'exec(',
 ]
+
+DOCKER_IMAGE = "python:3.11-slim"
+OUTPUT_LIMIT = 2000
+
+
+@dataclass
+class ExecutionResult:
+    success: bool
+    stdout: str
+    stderr: str
+    exit_code: int
 
 
 def is_code_safe(code: str) -> tuple[bool, str]:
@@ -33,69 +52,108 @@ def is_code_safe(code: str) -> tuple[bool, str]:
 
 def extract_code(message_content: str) -> str | None:
     match = re.search(r'```python\n(.*?)```', message_content, re.DOTALL)
-    if match:
-        return match.group(1).strip()
-    return None
+    return match.group(1).strip() if match else None
 
 
-def run_in_docker(code: str) -> dict:
-    client = docker.from_env()
+def _fail(stderr: str, exit_code: int = -1) -> ExecutionResult:
+    return ExecutionResult(success=False, stdout="", stderr=stderr, exit_code=exit_code)
+
+
+def run_in_docker(code: str) -> ExecutionResult:
+    try:
+        client = docker.from_env()
+    except docker.errors.DockerException as e:
+        return _fail(f"Cannot connect to Docker daemon: {e}")
+
     temp_dir = tempfile.mkdtemp()
     temp_file = os.path.join(temp_dir, "code_to_test.py")
 
     try:
-        with open(temp_file, 'w', encoding='utf-8') as f:
+        with open(temp_file, "w", encoding="utf-8") as f:
             f.write(code)
+    except OSError as e:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        return _fail(f"Failed to write code to temp file: {e}")
 
-        output = client.containers.run(
-            image="python:3.11-slim",
+    try:
+        container = client.containers.run(
+            image=DOCKER_IMAGE,
             command="python /code/code_to_test.py",
-            volumes={temp_dir: {'bind': '/code', 'mode': 'ro'}},
+            volumes={temp_dir: {"bind": "/code", "mode": "ro"}},
             mem_limit="128m",
             cpu_quota=50000,
+            pids_limit=64,
             network_disabled=True,
             read_only=True,
-            remove=True,
-            stdout=True,
-            stderr=True,
-            detach=False,
-            timeout=10
+            detach=True,
         )
-        return {
-            "success": True,
-            "stdout": output.decode('utf-8', errors='replace')[:2000],
-            "stderr": "",
-            "exit_code": 0
-        }
+
+        try:
+            result = container.wait(timeout=10)
+            exit_code = result.get("StatusCode", 1)
+
+            stdout_bytes = container.logs(stdout=True, stderr=False)
+            stderr_bytes = container.logs(stdout=False, stderr=True)
+
+            stdout = stdout_bytes.decode("utf-8", errors="replace") if stdout_bytes else ""
+            stderr = stderr_bytes.decode("utf-8", errors="replace") if stderr_bytes else ""
+
+            truncated_out = len(stdout) > OUTPUT_LIMIT
+            truncated_err = len(stderr) > OUTPUT_LIMIT
+
+            return ExecutionResult(
+                success=(exit_code == 0),
+                stdout=stdout[:OUTPUT_LIMIT] + ("\n[output truncated]" if truncated_out else ""),
+                stderr=stderr[:OUTPUT_LIMIT] + ("\n[output truncated]" if truncated_err else ""),
+                exit_code=exit_code,
+            )
+
+        except Exception:
+            container.kill()
+            return _fail("Execution timed out", exit_code=-1)
+
+        finally:
+            container.remove(force=True)
 
     except docker.errors.ContainerError as e:
-        return {
-            "success": False,
-            "stdout": "",
-            "stderr": e.stderr.decode('utf-8', errors='replace')[:2000],
-            "exit_code": 1
-        }
+        raw_stderr = e.stderr
+        if raw_stderr is None:
+            stderr_text = str(e)
+        elif isinstance(raw_stderr, bytes):
+            stderr_text = raw_stderr.decode("utf-8", errors="replace")
+        else:
+            stderr_text = str(raw_stderr)
+
+        raw_stdout = getattr(e, "output", None)
+        if raw_stdout and isinstance(raw_stdout, bytes):
+            stdout_text = raw_stdout.decode("utf-8", errors="replace")[:OUTPUT_LIMIT]
+        else:
+            stdout_text = ""
+
+        stderr_trimmed = stderr_text[:OUTPUT_LIMIT]
+
+        return ExecutionResult(
+            success=False,
+            stdout=stdout_text,
+            stderr=stderr_trimmed,
+            exit_code=e.exit_status if hasattr(e, "exit_status") else 1,
+        )
+
     except docker.errors.ImageNotFound:
-        return {
-            "success": False,
-            "stdout": "",
-            "stderr": "Docker image 'python:3.11-slim' not found. Run: docker pull python:3.11-slim",
-            "exit_code": -1
-        }
+        return _fail(
+            f"Docker image '{DOCKER_IMAGE}' not found. "
+            f"Pull it first with: docker pull {DOCKER_IMAGE}"
+        )
+
+    except docker.errors.APIError as e:
+        return _fail(f"Docker API error: {e}")
+
     except docker.errors.DockerException as e:
-        return {
-            "success": False,
-            "stdout": "",
-            "stderr": f"Docker error: {str(e)}",
-            "exit_code": -1
-        }
+        return _fail(f"Docker error: {e}")
+
     except Exception as e:
-        return {
-            "success": False,
-            "stdout": "",
-            "stderr": f"Unexpected error: {str(e)}",
-            "exit_code": -1
-        }
+        return _fail(f"Unexpected error during execution: {type(e).__name__}: {e}")
+
     finally:
         shutil.rmtree(temp_dir, ignore_errors=True)
 
@@ -111,17 +169,29 @@ def execute_code_tool(code: str) -> str:
     Returns:
         String describing execution result (PASS or FAIL with details)
     """
+    fenced = re.search(r'```(?:python)?\n(.*?)```', code, re.DOTALL)
+    if fenced:
+        code = fenced.group(1).strip()
+
     is_safe, reason = is_code_safe(code)
     if not is_safe:
         return f"FAIL: Safety check blocked execution\nReason: {reason}"
 
     result = run_in_docker(code)
 
-    if result['success']:
-        stdout_info = f"\nOutput:\n{result['stdout']}" if result['stdout'] else ""
+    if result.success:
+        stdout_info = f"\nOutput:\n{result.stdout}" if result.stdout.strip() else ""
         return f"PASS: Code executed successfully{stdout_info}"
-    else:
-        return f"FAIL: Execution failed\nError:\n{result['stderr']}"
+
+    parts = [f"FAIL: Execution failed (exit code {result.exit_code})"]
+
+    if result.stdout.strip():
+        parts.append(f"Stdout:\n{result.stdout}")
+
+    if result.stderr.strip():
+        parts.append(f"Stderr:\n{result.stderr}")
+
+    return "\n".join(parts)
 
 
 @tool
@@ -168,4 +238,4 @@ def clean_code_analysis_tool(code: str) -> dict:
 
 
 analysis_tools = [complexity_analyzer_tool, solid_analysis_tool, clean_code_analysis_tool]
-validator_tool = [execute_code_tool]
+validator_tool = [complexity_analyzer_tool, solid_analysis_tool, clean_code_analysis_tool, execute_code_tool]

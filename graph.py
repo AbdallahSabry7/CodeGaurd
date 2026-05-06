@@ -1,4 +1,4 @@
-from langchain.messages import AIMessage
+from langchain_core.messages import AIMessage
 from langgraph.graph import StateGraph, START, END
 from langgraph.prebuilt import ToolNode
 
@@ -19,13 +19,16 @@ def validator_router(state: AgentState) -> str:
     iterations = state.get("refactor_iterations", 0)
 
     if iterations >= 3:
-        return END
+        return "end"
 
     if isinstance(last_message, AIMessage) and last_message.tool_calls:
         return "TOOL_CALL"
+    
+    if not last_message.content or not last_message.content.strip():
+        return "end"
 
-    if isinstance(last_message, AIMessage) and "PASS" in last_message.content:
-        return END
+    if isinstance(last_message, AIMessage) and last_message.content and "PASS" in last_message.content:
+        return "end"
 
     return "refactor_agent"
 
@@ -46,8 +49,8 @@ def build_graph():
         should_call_tool,
         {
             "tool": "analysisTool",
-            "refactor": "Refactor Agent"
-        }
+            "refactor": "Refactor Agent",
+        },
     )
 
     graph.add_edge("analysisTool", "analyzer")
@@ -59,8 +62,8 @@ def build_graph():
         {
             "refactor_agent": "Refactor Agent",
             "TOOL_CALL": "validatorTool",
-            END: END
-        }
+            "end": END,
+        },
     )
 
     graph.add_edge("validatorTool", "Validator Agent")
