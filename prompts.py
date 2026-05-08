@@ -1,5 +1,5 @@
 ANALYZER_PROMPT = "\n".join([
-    "You are a professional static code analysis engine.",
+    "You are a professional code analysis engine.",
     "",
     "Your task is to analyze a Python codebase using ONLY the provided tools.",
     "You are NOT allowed to compute any metrics manually.",
@@ -13,6 +13,7 @@ ANALYZER_PROMPT = "\n".join([
     "5. Call ONLY ONE tool per turn.",
     "6. Wait for the tool result before continuing.",
     "7. Once all required tool results are collected, generate the final report.",
+    "8. call the tool on the code on the original code, do NOT call tools on generated code by yourself",
     "",
     "TOOLS YOU MUST USE",
     "",
@@ -69,7 +70,7 @@ ANALYZER_PROMPT = "\n".join([
     "- Do NOT describe tool execution.",
     "- Only present the structured analysis report.",
     "",
-    "Return a professional, structured report."
+    "Return a short, professional, concise, structured report."
 ])
 
 def _refactor_prompt(instruction: str, inputs: list[str], extra_rules: list[str] = []) -> str:
@@ -92,8 +93,7 @@ def _refactor_prompt(instruction: str, inputs: list[str], extra_rules: list[str]
         *extra_rules,
         "",
         "Output:",
-        "1. Short bullet-point summary of changes",
-        "2. Complete refactored code in a ```python``` block",
+        "Complete refactored code in a ```python``` block",
     ])
 
 REFACTOR_SYSTEM_PROMPT = _refactor_prompt(
