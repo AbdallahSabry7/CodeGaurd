@@ -1,23 +1,39 @@
-from langchain_core.messages import AIMessage, SystemMessage, HumanMessage, ToolMessage
+from langchain_core.messages import AIMessage, SystemMessage, HumanMessage
 from state import AgentState
 from prompts import ANALYZER_PROMPT, REFACTOR_SYSTEM_PROMPT, REFACTOR_SYSTEM_PROMPT2, VALIDATOR_PROMPT
 from llms import LLM, LLM2, LLM3
 
 
 def analyzer_agent(state: AgentState) -> AgentState:
+
+    code_to_analyze = state.get("refactored_code") or state["original_code"]
+    code_to_analyze = code_to_analyze.replace("\\n", "\n").strip()
+
+    analyzer_messages = state.get("analyzer_messages", [])
+
     system_msg = SystemMessage(content=ANALYZER_PROMPT)
-    messages = [system_msg] +[HumanMessage(content=state["original_code"])] + state["analyzer_messages"]
+    messages = [system_msg, HumanMessage(content=code_to_analyze)] + analyzer_messages
+
     response = LLM.invoke(messages)
 
     new_report = state.get("analyzer_report", "")
     if not response.tool_calls and response.content:
         new_report = response.content
 
-    return {
+    update = {
         "messages": [response],
-        "analyzer_messages": [response],
-        "analyzer_report": new_report,
+        "analyzer_messages": analyzer_messages + [response],
+        "analyzer_report": new_report
     }
+
+    if (
+        state.get("refactor_iterations", 0) == 0
+        and not response.tool_calls
+        and response.content
+    ):
+        update["original_analyzer_report"] = new_report
+
+    return update
 
 
 def refactor_agent(state: AgentState) -> AgentState:
@@ -48,16 +64,23 @@ def refactor_agent(state: AgentState) -> AgentState:
         "refactor_iterations": iterations + 1,
     }
 
+
 def validator_agent(state: AgentState) -> AgentState:
-
-
     system_msg = SystemMessage(content=VALIDATOR_PROMPT)
 
-    messages = [
+    base_messages = [
         system_msg,
-        HumanMessage(content=f"Analysis Report:\n{state['analyzer_report']}"),
-        HumanMessage(content=f"Refactored Code:\n{state['refactored_code']}"),
-    ]  + state.get("validator_messages", [])
+        HumanMessage(
+            content=(
+                f"Original Report:\n{state['original_analyzer_report']}\n\n"
+                f"Refactored Report:\n{state['analyzer_report']}\n\n"
+                f"Refactored Code:\n{state['refactored_code']}"
+            )
+        ),
+    ]
+
+    prior = state.get("validator_messages", [])
+    messages = base_messages + prior
 
     response = LLM3.invoke(messages)
 
@@ -67,6 +90,6 @@ def validator_agent(state: AgentState) -> AgentState:
 
     return {
         "messages": [response],
-        "validator_messages": list(state.get("validator_messages", [])) + [response],
-        "validator_report": new_report
+        "validator_messages": prior + [response],
+        "validator_report": new_report,
     }
