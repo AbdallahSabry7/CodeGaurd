@@ -8,7 +8,7 @@ os.environ["OPENROUTER_API_KEY"] = os.getenv("OPENROUTER_API_KEY")
 os.environ["LANGSMITH_API_KEY"] = os.getenv("LANGSMITH_API_KEY")
 os.environ['LANGCHAIN_TRACING_V2'] = 'true'
 os.environ['LANGCHAIN_ENDPOINT'] = 'https://api.smith.langchain.com'
-os.environ['LANGCHAIN_PROJECT'] = 'learning-langchain'
+os.environ['LANGCHAIN_PROJECT'] = 'code_analysis_refactor'
 
 from graph import build_graph
 
@@ -192,7 +192,8 @@ for key, default in {
     "running": False,
     "analyzer_report": "",
     "refactored_code": "",
-    "validator_report": "",
+    "comparator_report": "",
+    "execution_result": "",
     "final_verdict": "",
     "current_step": "idle",
     "error": "",
@@ -202,11 +203,12 @@ for key, default in {
 
 
 def render_steps():
-    order = ["idle", "analyzer", "refactor", "validator", "done"]
+    order = ["idle", "analyzer", "refactor", "comparator", "executer", "done"]
     steps = [
         ("analyzer",  "🔍", "Analyzing code"),
         ("refactor",  "🔧", "Refactoring"),
-        ("validator", "✅", "Validating"),
+        ("comparator","📊", "Comparing reports"),
+        ("executer",  "▶️", "Executing code"),
     ]
     current = st.session_state.current_step
     has_error = bool(st.session_state.error)
@@ -280,7 +282,12 @@ with left_col:
         error_slot.markdown(render_code_block(st.session_state.error, is_error=True), unsafe_allow_html=True)
 
 with right_col:
-    tab1, tab2, tab3 = st.tabs(["📋 Analysis Report", "🔧 Refactored Code", "✅ Validator Report"])
+    tab1, tab2, tab3, tab4 = st.tabs([
+        "📋 Analysis Report",
+        "🔧 Refactored Code",
+        "📊 Comparator Report",
+        "▶️ Execution Result",
+    ])
     with tab1:
         report_slot = st.empty()
         report_slot.markdown(render_code_block(st.session_state.analyzer_report), unsafe_allow_html=True)
@@ -288,8 +295,11 @@ with right_col:
         refactor_slot = st.empty()
         refactor_slot.markdown(render_code_block(st.session_state.refactored_code), unsafe_allow_html=True)
     with tab3:
-        validator_slot = st.empty()
-        validator_slot.markdown(render_code_block(st.session_state.validator_report), unsafe_allow_html=True)
+        comparator_slot = st.empty()
+        comparator_slot.markdown(render_code_block(st.session_state.comparator_report), unsafe_allow_html=True)
+    with tab4:
+        executer_slot = st.empty()
+        executer_slot.markdown(render_code_block(st.session_state.execution_result), unsafe_allow_html=True)
 
 
 if run_btn and (code_input or "").strip():
@@ -297,7 +307,8 @@ if run_btn and (code_input or "").strip():
         "running": True,
         "analyzer_report": "",
         "refactored_code": "",
-        "validator_report": "",
+        "comparator_report": "",
+        "execution_result": "",
         "final_verdict": "",
         "current_step": "analyzer",
         "error": "",
@@ -305,7 +316,8 @@ if run_btn and (code_input or "").strip():
 
     report_slot.markdown(render_code_block(""), unsafe_allow_html=True)
     refactor_slot.markdown(render_code_block(""), unsafe_allow_html=True)
-    validator_slot.markdown(render_code_block(""), unsafe_allow_html=True)
+    comparator_slot.markdown(render_code_block(""), unsafe_allow_html=True)
+    executer_slot.markdown(render_code_block(""), unsafe_allow_html=True)
     steps_slot.markdown(render_steps(), unsafe_allow_html=True)
     badge_slot.markdown(render_badge(), unsafe_allow_html=True)
     error_slot.empty()
@@ -318,14 +330,19 @@ if run_btn and (code_input or "").strip():
             "original_code": code_input,
             "refactor_iterations": 0,
             "analyzer_report": "",
+            "original_analyzer_report": "",
             "refactored_code": "",
-            "validator_report": ""
+            "comparator_report": "",
+            "execution_result": "",
+            "executer_messages": [],
+            "refactor_syntax_error": None,
         }
 
         for state in app.stream(inputs, stream_mode="values"):
             analyzer_report  = state.get("analyzer_report", "")
             refactored_code  = state.get("refactored_code", "")
-            validator_report = state.get("validator_report", "")
+            comparator_report = state.get("comparator_report", "")
+            execution_result  = state.get("execution_result", "")
 
             if analyzer_report and analyzer_report != st.session_state.analyzer_report:
                 st.session_state.analyzer_report = analyzer_report
@@ -336,15 +353,22 @@ if run_btn and (code_input or "").strip():
 
             if refactored_code and refactored_code != st.session_state.refactored_code:
                 st.session_state.refactored_code = refactored_code
-                st.session_state.current_step = "validator"
+                st.session_state.current_step = "comparator"
                 refactor_slot.markdown(render_code_block(refactored_code), unsafe_allow_html=True)
                 steps_slot.markdown(render_steps(), unsafe_allow_html=True)
                 badge_slot.markdown(render_badge(), unsafe_allow_html=True)
 
-            if validator_report and validator_report != st.session_state.validator_report:
-                st.session_state.validator_report = validator_report
-                st.session_state.final_verdict = validator_report
-                validator_slot.markdown(render_code_block(validator_report), unsafe_allow_html=True)
+            if comparator_report and comparator_report != st.session_state.comparator_report:
+                st.session_state.comparator_report = comparator_report
+                st.session_state.current_step = "executer"
+                comparator_slot.markdown(render_code_block(comparator_report), unsafe_allow_html=True)
+                steps_slot.markdown(render_steps(), unsafe_allow_html=True)
+                badge_slot.markdown(render_badge(), unsafe_allow_html=True)
+
+            if execution_result and execution_result != st.session_state.execution_result:
+                st.session_state.execution_result = execution_result
+                st.session_state.final_verdict = execution_result
+                executer_slot.markdown(render_code_block(execution_result), unsafe_allow_html=True)
                 badge_slot.markdown(render_badge(), unsafe_allow_html=True)
 
         st.session_state.current_step = "done"

@@ -12,7 +12,7 @@ LLM = ChatGroq(
 ).bind_tools(analysis_tools, parallel_tool_calls=False)
 
 LLM2 = ChatOpenAI(
-    model="poolside/laguna-m.1:free",
+    model="openrouter/owl-alpha",
     openai_api_key=os.environ["OPENROUTER_API_KEY"],
     openai_api_base="https://openrouter.ai/api/v1",
     temperature=0,

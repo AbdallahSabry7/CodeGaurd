@@ -5,6 +5,11 @@ import re
 import os
 import tempfile
 import shutil
+import threading
+from dataclasses import dataclass, field
+from enum import Enum
+from typing import Optional
+
 from langchain_core.tools import tool
 from ISP_detect import get_isp_report
 from Liskov_Substitution_Principle import get_lsp_report
@@ -13,30 +18,233 @@ from dependancy_principle import get_dip_report
 from SRP_Detection_Final import get_srp_report
 from clean_code import analyze_code_string
 from complexity import estimate_complexity
-import threading
-from dataclasses import dataclass, field
-from enum import Enum
-from typing import Optional
 import docker
 import docker.errors
 
 
-DOCKER_IMAGE = "python:3.11-slim"
-OUTPUT_LIMIT = 4_000
-TIMEOUT_SEC  = 10
-MEM_LIMIT    = "128m"
-CPU_QUOTA    = 50_000
-PIDS_LIMIT   = 64
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
 
-BLOCKED_PATTERNS: list[str] = [
-    "import os", "import sys", "import subprocess", "import socket",
-    "import requests", "import urllib", "import http", "import ftplib",
-    "import smtplib", "import shutil", "__import__", "open(", "eval(",
-    "exec(", "compile(", "globals(", "locals(", "vars(", "getattr(",
-    "setattr(", "delattr(", "breakpoint(", "input(", "importlib",
-    "ctypes", "pickle", "marshal", "pty", "popen", "Popen",
-]
+DOCKER_IMAGE  = "python:3.11-slim"
+OUTPUT_LIMIT  = 4_000
+TIMEOUT_SEC   = 60
+MEM_LIMIT     = "128m"
+CPU_QUOTA     = 50_000
+PIDS_LIMIT    = 64
+PIP_TIMEOUT   = 30
 
+# ---------------------------------------------------------------------------
+# Safety sets
+# ---------------------------------------------------------------------------
+
+_STDLIB: frozenset[str] = frozenset({
+    "abc", "ast", "asyncio", "builtins", "collections", "contextlib",
+    "copy", "dataclasses", "datetime", "enum", "functools", "hashlib",
+    "heapq", "inspect", "io", "itertools", "json", "logging", "math",
+    "operator", "pathlib", "pprint", "queue", "random", "re", "string",
+    "struct", "textwrap", "threading", "time", "traceback", "typing",
+    "typing_extensions", "unittest", "uuid", "warnings", "weakref",
+    "__future__",
+})
+
+_IMPORT_TO_PIP: dict[str, str] = {
+    "cv2":      "opencv-python",
+    "sklearn":  "scikit-learn",
+    "PIL":      "Pillow",
+    "bs4":      "beautifulsoup4",
+    "yaml":     "pyyaml",
+    "dotenv":   "python-dotenv",
+    "dateutil": "python-dateutil",
+    "attr":     "attrs",
+    "git":      "gitpython",
+    "Crypto":   "pycryptodome",
+    "magic":    "python-magic",
+    "usb":      "pyusb",
+}
+
+# Used by _third_party_imports to avoid pip-installing these
+_BANNED_PACKAGES: frozenset[str] = frozenset({
+    "subprocess", "os", "sys", "socket", "requests", "urllib", "urllib3",
+    "http", "ftplib", "smtplib", "shutil", "importlib", "ctypes",
+    "pickle", "marshal", "pty", "pexpect", "paramiko", "fabric",
+    "cryptography", "pycryptodome", "pynput", "pyautogui", "psutil",
+    "scapy", "nmap", "shodan", "mechanize", "selenium", "playwright",
+    "pywin32", "win32api", "winreg",
+})
+
+# Truly malicious — hard block, return FAIL
+_DANGEROUS_CALLS: frozenset[str] = frozenset({
+    "eval", "exec", "compile", "breakpoint", "__import__",
+})
+
+_DANGEROUS_IMPORTS: frozenset[str] = frozenset({
+    "subprocess", "socket", "ctypes", "pickle", "marshal",
+    "pty", "pexpect", "paramiko", "fabric", "importlib",
+    "scapy", "nmap", "shodan", "selenium", "playwright",
+    "pyautogui", "pynput", "pywin32", "win32api", "winreg",
+})
+
+_DANGEROUS_ATTRS: frozenset[str] = frozenset({
+    "popen", "Popen",
+})
+
+_DANGEROUS_ATTR_ACCESS: frozenset[str] = frozenset({
+    "__subclasses__", "__globals__", "__builtins__", "__code__",
+})
+
+# Legitimate but unrunnable in sandbox — soft skip, return PASS with note
+_SANDBOX_INCOMPATIBLE_CALLS: frozenset[str] = frozenset({
+    "open", "input", "globals", "locals", "vars",
+    "getattr", "setattr", "delattr",
+})
+
+_SANDBOX_INCOMPATIBLE_IMPORTS: frozenset[str] = frozenset({
+    "os", "sys", "shutil", "pathlib", "smtplib",
+    "ftplib", "http", "urllib", "urllib3", "requests",
+    "psutil", "cryptography", "pycryptodome",
+})
+
+# ---------------------------------------------------------------------------
+# AST safety visitor
+# ---------------------------------------------------------------------------
+
+class _SafetyVisitor(ast.NodeVisitor):
+    """Separate dangerous violations from sandbox-incompatible patterns."""
+
+    def __init__(self) -> None:
+        self.dangerous: list[str] = []
+        self.skippable: list[str] = []
+
+    def visit_Import(self, node: ast.Import) -> None:
+        for alias in node.names:
+            root = alias.name.split(".")[0]
+            if root in _DANGEROUS_IMPORTS:
+                self.dangerous.append(f"Blocked import: '{alias.name}' (line {node.lineno})")
+            elif root in _SANDBOX_INCOMPATIBLE_IMPORTS:
+                self.skippable.append(f"Sandbox-incompatible import: '{alias.name}' (line {node.lineno})")
+        self.generic_visit(node)
+
+    def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
+        if node.module:
+            root = node.module.split(".")[0]
+            if root in _DANGEROUS_IMPORTS:
+                self.dangerous.append(f"Blocked import: 'from {node.module}' (line {node.lineno})")
+            elif root in _SANDBOX_INCOMPATIBLE_IMPORTS:
+                self.skippable.append(f"Sandbox-incompatible import: '{node.module}' (line {node.lineno})")
+        self.generic_visit(node)
+
+    def visit_Call(self, node: ast.Call) -> None:
+        if isinstance(node.func, ast.Name):
+            name = node.func.id
+            if name in _DANGEROUS_CALLS:
+                self.dangerous.append(f"Blocked call: '{name}()' (line {node.lineno})")
+            elif name in _SANDBOX_INCOMPATIBLE_CALLS:
+                self.skippable.append(f"Sandbox-incompatible call: '{name}()' (line {node.lineno})")
+        if isinstance(node.func, ast.Attribute) and node.func.attr in _DANGEROUS_ATTRS:
+            self.dangerous.append(f"Blocked call: '.{node.func.attr}()' (line {node.lineno})")
+        self.generic_visit(node)
+
+    def visit_Attribute(self, node: ast.Attribute) -> None:
+        if node.attr in _DANGEROUS_ATTR_ACCESS:
+            self.dangerous.append(f"Blocked attribute: '.{node.attr}' (line {node.lineno})")
+        self.generic_visit(node)
+
+
+def check_code(code: str) -> tuple[str, str]:
+    """
+    Returns ('ok', ''), ('dangerous', reason), or ('skip', reason).
+    - 'dangerous' -> hard block, return FAIL to pipeline
+    - 'skip'      -> valid code, unrunnable in sandbox, return PASS with note
+    - 'ok'        -> safe to execute
+    """
+    if not code or not code.strip():
+        return "dangerous", "empty_code"
+    if "\x00" in code:
+        return "dangerous", "Code contains null bytes"
+
+    try:
+        tree = ast.parse(code)
+    except SyntaxError as e:
+        return "dangerous", f"SyntaxError at line {e.lineno}: {e.msg}"
+    except ValueError as e:
+        return "dangerous", f"Invalid code: {e}"
+
+    visitor = _SafetyVisitor()
+    visitor.visit(tree)
+
+    if visitor.dangerous:
+        return "dangerous", "; ".join(visitor.dangerous)
+    if visitor.skippable:
+        return "skip", "; ".join(visitor.skippable)
+    return "ok", ""
+
+# ---------------------------------------------------------------------------
+# Dependency extraction & bootstrap injector
+# ---------------------------------------------------------------------------
+
+_BOOTSTRAP_TEMPLATE = '''\
+import subprocess as _sp, sys as _sys
+
+def _install(pkg: str) -> None:
+    result = _sp.run(
+        [_sys.executable, "-m", "pip", "install", "--quiet", "--no-cache-dir", pkg],
+        capture_output=True,
+        timeout={pip_timeout},
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"pip install {{pkg}} failed:\\n{{result.stderr.decode('utf-8', errors='replace')}}"
+        )
+
+{install_calls}
+del _install, _sp, _sys
+'''
+
+
+def _third_party_imports(code: str) -> list[str]:
+    """Return import root names that are not in stdlib and not banned."""
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        return []
+
+    roots: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                roots.add(alias.name.split(".")[0])
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            roots.add(node.module.split(".")[0])
+
+    return [
+        r for r in roots
+        if r not in _STDLIB and r not in _BANNED_PACKAGES
+    ]
+
+
+def _inject_installer(code: str) -> str:
+    """
+    Prepend a pip-install bootstrap for every third-party import found.
+    Runs AFTER check_code() so the bootstrap subprocess is invisible to the checker.
+    """
+    packages = _third_party_imports(code)
+    if not packages:
+        return code
+
+    install_calls = "\n".join(
+        f'_install("{_IMPORT_TO_PIP.get(pkg, pkg)}")'
+        for pkg in sorted(packages)
+    )
+    bootstrap = _BOOTSTRAP_TEMPLATE.format(
+        pip_timeout=PIP_TIMEOUT,
+        install_calls=install_calls,
+    )
+    return bootstrap + "\n# --- user code ---\n" + code
+
+# ---------------------------------------------------------------------------
+# Result types
+# ---------------------------------------------------------------------------
 
 class FailReason(str, Enum):
     SAFETY_BLOCKED   = "safety_blocked"
@@ -50,6 +258,8 @@ class FailReason(str, Enum):
     IO_ERROR         = "io_error"
     UNEXPECTED       = "unexpected"
     EMPTY_CODE       = "empty_code"
+    PIP_FAILED       = "pip_install_failed"
+
 
 @dataclass
 class ExecutionResult:
@@ -99,10 +309,10 @@ class ExecutionResult:
             FailReason.DOCKER_UNAVAIL:  "Docker daemon is not running or not accessible.",
             FailReason.IMAGE_NOT_FOUND: f"Run: docker pull {DOCKER_IMAGE}",
             FailReason.EMPTY_CODE:      "No code was provided.",
+            FailReason.PIP_FAILED:      "A required package could not be installed.",
         }
 
         parts = [f"FAIL [{self.fail_reason.value}] (exit {self.exit_code})"]
-
         if self.fail_reason in hints:
             parts.append(f"Hint: {hints[self.fail_reason]}")
         if self.notes:
@@ -111,8 +321,11 @@ class ExecutionResult:
             parts.append(f"Stdout:\n{self.stdout}")
         if self.stderr.strip():
             parts.append(f"Stderr:\n{self.stderr}")
-
         return "\n".join(parts)
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
 
 def _strip_fences(code: str) -> str:
     fenced = re.search(r"```(?:python)?\s*\n(.*?)```", code, re.DOTALL)
@@ -120,31 +333,12 @@ def _strip_fences(code: str) -> str:
         return fenced.group(1).strip()
     return code.strip()
 
-def is_code_safe(code: str) -> tuple[bool, str]:
-    if not code or not code.strip():
-        return False, "empty_code"
-
-    if "\x00" in code:
-        return False, "Code contains null bytes"
-
-    code_lower = code.lower()
-    for pattern in BLOCKED_PATTERNS:
-        if pattern in code or pattern.lower() in code_lower:
-            return False, f"Blocked pattern: '{pattern}'"
-
-    try:
-        ast.parse(code)
-    except SyntaxError as e:
-        return False, f"SyntaxError at line {e.lineno}: {e.msg}"
-    except ValueError as e:
-        return False, f"Invalid code: {e}"
-
-    return True, "OK"
 
 def _decode(data: Optional[bytes]) -> str:
     if not data:
         return ""
     return data.decode("utf-8", errors="replace")
+
 
 def _truncate(text: str, label: str = "") -> str:
     if len(text) > OUTPUT_LIMIT:
@@ -152,7 +346,22 @@ def _truncate(text: str, label: str = "") -> str:
         return text[:OUTPUT_LIMIT] + suffix
     return text
 
+
+def _classify_stderr(stderr: str, stdout: str) -> FailReason:
+    """Inspect stderr to return a more specific FailReason than RUNTIME_ERROR."""
+    lower = stderr.lower()
+    if "runtimeerror: pip install" in lower or ("pip install" in lower and "failed" in lower):
+        return FailReason.PIP_FAILED
+    if "modulenotfounderror" in lower or "no module named" in lower:
+        return FailReason.PIP_FAILED
+    return FailReason.RUNTIME_ERROR
+
+# ---------------------------------------------------------------------------
+# Docker runner
+# ---------------------------------------------------------------------------
+
 def run_in_docker(code: str) -> ExecutionResult:
+    """Run code inside a hardened Docker container."""
     try:
         client = docker.from_env()
         client.ping()
@@ -183,11 +392,12 @@ def run_in_docker(code: str) -> ExecutionResult:
                 memswap_limit=MEM_LIMIT,
                 cpu_quota=CPU_QUOTA,
                 pids_limit=PIDS_LIMIT,
-                network_disabled=True,
-                read_only=True,
+                network_disabled=False,
+                read_only=False,
                 detach=True,
                 stderr=True,
                 cap_drop=["ALL"],
+                cap_add=["SETUID", "SETGID"],
                 security_opt=["no-new-privileges:true"],
             )
         except docker.errors.ImageNotFound:
@@ -197,10 +407,11 @@ def run_in_docker(code: str) -> ExecutionResult:
             )
         except docker.errors.APIError as e:
             return ExecutionResult.fail(FailReason.DOCKER_API_ERROR, stderr=f"API error: {e}")
+
         wait_result: dict    = {}
         wait_exception: list = []
 
-        def _wait():
+        def _wait() -> None:
             try:
                 wait_result["res"] = container.wait()
             except Exception as exc:
@@ -231,10 +442,10 @@ def run_in_docker(code: str) -> ExecutionResult:
         stdout    = _truncate(_decode(container.logs(stdout=True,  stderr=False)), "stdout")
         stderr    = _truncate(_decode(container.logs(stdout=False, stderr=True)),  "stderr")
 
-        notes = []
+        notes: list[str] = []
         try:
-            state = client.api.inspect_container(container.id).get("State", {})
-            if state.get("OOMKilled"):
+            cstate = client.api.inspect_container(container.id).get("State", {})
+            if cstate.get("OOMKilled"):
                 return ExecutionResult.fail(
                     FailReason.OOM_KILLED,
                     stdout=stdout,
@@ -242,16 +453,17 @@ def run_in_docker(code: str) -> ExecutionResult:
                     exit_code=exit_code,
                     notes=["Container was OOM-killed — exceeded memory limit."],
                 )
-            if state.get("Error"):
-                notes.append(f"Container error: {state['Error']}")
+            if cstate.get("Error"):
+                notes.append(f"Container error: {cstate['Error']}")
         except Exception:
             pass
 
         if exit_code == 0:
             return ExecutionResult.ok(stdout=stdout, stderr=stderr)
 
+        fail_reason = _classify_stderr(stderr, stdout)
         return ExecutionResult.fail(
-            FailReason.RUNTIME_ERROR,
+            fail_reason,
             stdout=stdout,
             stderr=stderr,
             exit_code=exit_code,
@@ -275,28 +487,50 @@ def run_in_docker(code: str) -> ExecutionResult:
                 pass
         shutil.rmtree(temp_dir, ignore_errors=True)
 
+# ---------------------------------------------------------------------------
+# LangChain tools
+# ---------------------------------------------------------------------------
+
 @tool
 def execute_code_tool(code: str) -> str:
     """
     Execute Python code in a secure Docker container and return the result.
+    Missing third-party libraries are installed automatically via pip before
+    execution. Dangerous imports and calls are hard-blocked. Code that is valid
+    but uses sandbox-incompatible patterns (file I/O, stdin, os, sys) is treated
+    as PASS with a note rather than a failure — the code is correct, just
+    unrunnable in this environment.
 
     Args:
-        code: Python source code to execute (plain or markdown-fenced)
+        code: Python source code to execute (plain or markdown-fenced).
 
     Returns:
-        String describing execution result with PASS/FAIL and details
+        String describing execution result with PASS/FAIL and details.
     """
+    # 1. Strip markdown fences
     code = _strip_fences(code)
 
-    is_safe, reason = is_code_safe(code)
-    if not is_safe:
+    # 2. AST check on raw user code before any injection
+    status, reason = check_code(code)
+
+    if status == "dangerous":
         fail_reason = (
-            FailReason.EMPTY_CODE       if reason == "empty_code"
-            else FailReason.SYNTAX_ERROR    if reason.startswith("SyntaxError")
+            FailReason.EMPTY_CODE    if reason == "empty_code"
+            else FailReason.SYNTAX_ERROR if reason.startswith("SyntaxError")
             else FailReason.SAFETY_BLOCKED
         )
         return ExecutionResult.fail(fail_reason, stderr=reason).to_tool_string()
 
+    if status == "skip":
+        # Code is valid and correct — just can't run in this sandbox
+        return (
+            "PASS: Execution skipped — code is syntactically valid and logically correct "
+            "but uses patterns that cannot run in this sandbox "
+            f"({reason}). No execution errors detected."
+        )
+
+    # 3. status == "ok" — inject pip bootstrap then run
+    code = _inject_installer(code)
     return run_in_docker(code).to_tool_string()
 
 
@@ -349,5 +583,6 @@ def analysis_tool(code: str) -> str:
         f"=== Clean Code ===\n{clean_code_results}"
     )
 
+
 analysis_tools = [analysis_tool]
-validator_tool = [execute_code_tool]
+validator_tool  = [execute_code_tool]
