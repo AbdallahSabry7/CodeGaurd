@@ -22,10 +22,6 @@ import docker
 import docker.errors
 
 
-# ---------------------------------------------------------------------------
-# Constants
-# ---------------------------------------------------------------------------
-
 DOCKER_IMAGE  = "python:3.11-slim"
 OUTPUT_LIMIT  = 4_000
 TIMEOUT_SEC   = 60
@@ -34,9 +30,6 @@ CPU_QUOTA     = 50_000
 PIDS_LIMIT    = 64
 PIP_TIMEOUT   = 30
 
-# ---------------------------------------------------------------------------
-# Safety sets
-# ---------------------------------------------------------------------------
 
 _STDLIB: frozenset[str] = frozenset({
     "abc", "ast", "asyncio", "builtins", "collections", "contextlib",
@@ -63,7 +56,6 @@ _IMPORT_TO_PIP: dict[str, str] = {
     "usb":      "pyusb",
 }
 
-# Used by _third_party_imports to avoid pip-installing these
 _BANNED_PACKAGES: frozenset[str] = frozenset({
     "subprocess", "os", "sys", "socket", "requests", "urllib", "urllib3",
     "http", "ftplib", "smtplib", "shutil", "importlib", "ctypes",
@@ -105,9 +97,6 @@ _SANDBOX_INCOMPATIBLE_IMPORTS: frozenset[str] = frozenset({
     "psutil", "cryptography", "pycryptodome",
 })
 
-# ---------------------------------------------------------------------------
-# AST safety visitor
-# ---------------------------------------------------------------------------
 
 class _SafetyVisitor(ast.NodeVisitor):
     """Separate dangerous violations from sandbox-incompatible patterns."""
@@ -179,9 +168,6 @@ def check_code(code: str) -> tuple[str, str]:
         return "skip", "; ".join(visitor.skippable)
     return "ok", ""
 
-# ---------------------------------------------------------------------------
-# Dependency extraction & bootstrap injector
-# ---------------------------------------------------------------------------
 
 _BOOTSTRAP_TEMPLATE = '''\
 import subprocess as _sp, sys as _sys
@@ -242,9 +228,6 @@ def _inject_installer(code: str) -> str:
     )
     return bootstrap + "\n# --- user code ---\n" + code
 
-# ---------------------------------------------------------------------------
-# Result types
-# ---------------------------------------------------------------------------
 
 class FailReason(str, Enum):
     SAFETY_BLOCKED   = "safety_blocked"
@@ -323,9 +306,6 @@ class ExecutionResult:
             parts.append(f"Stderr:\n{self.stderr}")
         return "\n".join(parts)
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
 
 def _strip_fences(code: str) -> str:
     fenced = re.search(r"```(?:python)?\s*\n(.*?)```", code, re.DOTALL)
@@ -356,9 +336,6 @@ def _classify_stderr(stderr: str, stdout: str) -> FailReason:
         return FailReason.PIP_FAILED
     return FailReason.RUNTIME_ERROR
 
-# ---------------------------------------------------------------------------
-# Docker runner
-# ---------------------------------------------------------------------------
 
 def run_in_docker(code: str) -> ExecutionResult:
     """Run code inside a hardened Docker container."""
@@ -487,9 +464,6 @@ def run_in_docker(code: str) -> ExecutionResult:
                 pass
         shutil.rmtree(temp_dir, ignore_errors=True)
 
-# ---------------------------------------------------------------------------
-# LangChain tools
-# ---------------------------------------------------------------------------
 
 @tool
 def execute_code_tool(code: str) -> str:
@@ -522,7 +496,6 @@ def execute_code_tool(code: str) -> str:
         return ExecutionResult.fail(fail_reason, stderr=reason).to_tool_string()
 
     if status == "skip":
-        # Code is valid and correct — just can't run in this sandbox
         return (
             "PASS: Execution skipped — code is syntactically valid and logically correct "
             "but uses patterns that cannot run in this sandbox "
@@ -582,7 +555,3 @@ def analysis_tool(code: str) -> str:
         f"=== SOLID ===\n{json.dumps(solid_results, indent=2)}\n\n"
         f"=== Clean Code ===\n{clean_code_results}"
     )
-
-
-analysis_tools = [analysis_tool]
-validator_tool  = [execute_code_tool]

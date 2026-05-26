@@ -4,8 +4,6 @@ from langgraph.graph.message import add_messages
 
 class AgentState(TypedDict):
     messages:                 Annotated[List[AnyMessage], add_messages]
-    analyzer_messages:        List[AnyMessage]  
-    executer_messages:        List[AnyMessage]
     analyzer_report:          str
     original_analyzer_report: str
     original_code:            str
