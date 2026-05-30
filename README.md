@@ -85,21 +85,63 @@ CodeGuard is built on **LangGraph**, a framework for building stateful multi-age
 | `execution_result` | Populated by Executor, fed back to Refactor Agent on FAIL |
 | `refactor_iterations` | Loop counter — hard stop at 3 |
 
+---
+
 ### Project Structure
 
 ```
 CodeGuard/
-├── main.py               # CLI entry point
-├── app.py                # Streamlit web UI
-├── graph.py              # LangGraph graph definition and routing logic
-├── agents.py             # Analyzer, Refactor, Comparator, and Executor node functions
-├── state.py              # AgentState TypedDict
-├── tools.py              # analysis_tool + execute_code_tool definitions
-├── complexity.py         # AST-based complexity analyzer
-├── prompts.py            # REFACTOR_SYSTEM_PROMPT, REFACTOR_SYSTEM_PROMPT2, COMPARATOR_PROMPT
-├── llms.py               # LLM instantiation (Groq + OpenRouter)
-├── code_to_analyze.py    # Drop your code here for CLI usage
-└── requirements.txt
+├── app/
+│   ├── __init__.py
+│   ├── agents/
+│   │   ├── __init__.py
+│   │   ├── refactor.py          # Refactor Agent node (LLM)
+│   │   └── comparator.py        # Comparator Agent node (LLM)
+│   ├── nodes/
+│   │   ├── __init__.py
+│   │   ├── analyzer.py          # Analyzer node (plain function)
+│   │   ├── syntax_check.py      # Syntax Check node (plain function)
+│   │   └── executor.py          # Executor node (plain function)
+│   ├── tools/
+│   │   ├── __init__.py
+│   │   ├── analysis_tool.py     # complexity + SOLID + clean code index
+│   │   └── execute_tool.py      # Docker sandbox runner
+│   ├── analysis/
+│   │   ├── __init__.py
+│   │   └── complexity.py        # AST-based complexity analyzer
+│   ├── prompts/
+│   │   ├── __init__.py
+│   │   ├── refactor.py          # REFACTOR_SYSTEM_PROMPT, REFACTOR_SYSTEM_PROMPT2
+│   │   └── comparator.py        # COMPARATOR_PROMPT
+│   ├── config.py                # pydantic-settings: all env vars and constants
+│   ├── state.py                 # AgentState TypedDict
+│   ├── graph.py                 # LangGraph graph definition and routing logic
+│   └── llms.py                  # LLM instantiation (Groq + OpenRouter)
+│
+├── ui/
+│   ├── __init__.py
+│   └── streamlit_app.py         # Streamlit web UI (no imports from ui/ in core app/)
+│
+├── scripts/
+│   └── cli.py                   # CLI entry point (replaces main.py + code_to_analyze.py)
+│
+├── tests/
+│   ├── __init__.py
+│   ├── conftest.py
+│   ├── unit/
+│   │   ├── test_analyzer.py
+│   │   ├── test_syntax_check.py
+│   │   └── test_complexity.py
+│   └── integration/
+│       ├── test_graph_routing.py
+│       └── test_executor.py     # requires Docker
+│
+├── .env.example                 # template — safe to commit
+├── .gitignore
+├── .pre-commit-config.yaml      # ruff + mypy on commit
+├── pyproject.toml               # replaces requirements.txt; includes tool config
+├── LICENSE
+└── README.md
 ```
 
 ---
@@ -119,7 +161,7 @@ CodeGuard/
 ### 1. Clone the repository
 
 ```bash
-git clone https://github.com/yourusername/CodeGuard.git
+git clone https://github.com/AbdallahSabry7/CodeGuard.git
 cd CodeGuard
 ```
 
@@ -138,21 +180,18 @@ source venv/bin/activate
 ### 3. Install dependencies
 
 ```bash
-pip install -r requirements.txt
+pip install -e ".[dev]"
 ```
 
 ---
 
 ## Environment Setup
 
-Create a `.env` file in the project root:
+Copy the example env file and fill in your keys:
 
 ```bash
-touch .env   # macOS/Linux
-# or create it manually on Windows
+cp .env.example .env
 ```
-
-Add the following keys:
 
 ```env
 GROQ_API_KEY=your_groq_api_key_here
@@ -205,20 +244,20 @@ You should see `Python 3.11.x`. If you get an error, make sure Docker Desktop is
 ### Web UI (Streamlit)
 
 ```bash
-streamlit run app.py
+streamlit run ui/streamlit_app.py
 ```
 
 Open http://localhost:8501 in your browser. Paste your Python code or upload a `.py` file and click **Run Analysis**. Results stream live across four tabs: Analysis Report, Refactored Code, Comparator Report, and Execution Result.
 
 ### CLI
 
-Paste your code into `code_to_analyze.py`, then run:
-
 ```bash
-python main.py
-```
+# Analyze a file
+python scripts/cli.py --file path/to/your_code.py
 
-The final execution result will be printed to the terminal.
+# Analyze from stdin
+cat your_code.py | python scripts/cli.py --stdin
+```
 
 ---
 
@@ -238,4 +277,4 @@ The final execution result will be printed to the terminal.
 
 ## License
 
-MIT
+Apache-2.0
