@@ -44,7 +44,7 @@ _BUILTIN_TYPES: frozenset[str] = frozenset({
     "Sequence", "MutableSequence",
     "Mapping", "MutableMapping",
     "Set", "MutableSet",
-    "ClassVar", "Final", "TypeVar", "ParamSpec",
+    "ClassVar", "Final", "TypeVar", "ParamSpec", "Annotated",
     # common safe names
     "Self", "Never", "NoReturn", "object",
     # exceptions are not DIP violations
@@ -60,7 +60,20 @@ _BUILTIN_TYPES: frozenset[str] = frozenset({
 # preventing false negatives on names like "Image", "Index", "Item".
 _ABSTRACT_SUFFIXES: tuple[str, ...] = (
     "Base", "ABC", "Abstract", "Protocol", "Interface", "Mixin",
+    # DDD / hexagonal architecture conventions — only unambiguous abstract nouns.
+    # "Store", "Service", "Handler" etc. are deliberately omitted: they are
+    # equally common as concrete class names (e.g. SqliteStore, FileHandler).
+    "Repository", "Gateway", "Port", "Resolver",
 )
+
+# Transparent generic wrappers — drill into their type argument(s)
+_TRANSPARENT_WRAPPERS: frozenset[str] = frozenset({
+    "Optional", "Union", "List", "Set", "FrozenSet", "Sequence", "Iterable",
+    "Iterator", "AsyncIterator", "AsyncIterable", "Generator", "AsyncGenerator",
+    "Type", "ClassVar", "Final", "Awaitable", "Coroutine",
+    # lower-case built-in generics (3.9+)
+    "list", "set", "frozenset", "tuple", "type",
+})
 
 
 def _looks_abstract_by_name(name: str) -> bool:
@@ -88,39 +101,101 @@ class Violation(NamedTuple):
 # AST helpers
 # ---------------------------------------------------------------------------
 
-def _extract_type_name(annotation: ast.expr) -> str | None:
+def _collect_concrete_names(annotation: ast.expr) -> list[str]:
     """
-    Return the bare type name from an annotation node.
+    Recursively collect all type names embedded in an annotation.
 
-    Handles:
-      - ``Name``          →  ``Foo``
-      - ``Attribute``     →  ``module.Foo`` → ``"Foo"``
-      - ``Subscript``     →  ``Optional[Foo]`` → recurse on value → ``"Optional"``
-                             For generic aliases we want the *inner* type when
-                             the outer is a known wrapper (Optional, List, …).
-      - ``BinOp``         →  ``Foo | None`` (PEP 604) — left operand checked
+    Unlike the old ``_extract_type_name`` this function drills into *every*
+    argument of every generic alias so that composite types like
+    ``Dict[str, ConcreteClass]``, ``Tuple[Foo, Bar]``, and
+    ``Union[Foo, Bar, None]`` are fully checked.
+
+    Returns a flat list of bare type-name strings (may be empty).
     """
     if isinstance(annotation, ast.Name):
-        return annotation.id
+        return [annotation.id]
+
     if isinstance(annotation, ast.Attribute):
-        return annotation.attr
+        return [annotation.attr]
+
+    if isinstance(annotation, ast.Constant):
+        # Forward-reference strings — parse them for completeness.
+        if isinstance(annotation.value, str):
+            try:
+                inner = ast.parse(annotation.value, mode="eval").body
+                return _collect_concrete_names(inner)
+            except SyntaxError:
+                pass
+        return []  # None constant or other literal
+
     if isinstance(annotation, ast.Subscript):
-        outer = _extract_type_name(annotation.value)
-        # For Optional[X], List[X], etc. drill into the inner type
-        if outer in ("Optional", "Union", "List", "Set", "Dict", "Tuple",
-                     "FrozenSet", "Sequence", "Iterable", "Iterator",
-                     "Type", "ClassVar", "Final"):
-            return _extract_type_name(annotation.slice)
-        return outer
+        outer_name = _extract_outer_name(annotation.value)
+
+        # Annotated[X, metadata, …]  — only X is a type; skip metadata args.
+        if outer_name == "Annotated":
+            slice_node = annotation.slice
+            # The first element of the tuple is the real type.
+            if isinstance(slice_node, ast.Tuple) and slice_node.elts:
+                return _collect_concrete_names(slice_node.elts[0])
+            return _collect_concrete_names(slice_node)
+
+        # Dict / Mapping / Tuple / … — check all inner args.
+        if outer_name in _TRANSPARENT_WRAPPERS or outer_name in (
+            "Dict", "Mapping", "MutableMapping", "Tuple", "MutableSet",
+            "dict", "tuple",
+        ):
+            return _collect_from_slice(annotation.slice)
+
+        # Unknown generic — surface only the outer name; don't dig inside
+        # (e.g. ``MyGeneric[int]`` — the violation is ``MyGeneric`` itself).
+        return [outer_name] if outer_name else []
+
     if isinstance(annotation, ast.BinOp) and isinstance(annotation.op, ast.BitOr):
-        # PEP 604: X | Y  — check both sides; return the first concrete one
-        left = _extract_type_name(annotation.left)
-        right = _extract_type_name(annotation.right)
-        # Prefer whichever is not "None"
-        return left if left != "None" else right
-    if isinstance(annotation, ast.Constant) and annotation.value is None:
-        return "None"
+        # PEP 604: X | Y | Z
+        return (
+            _collect_concrete_names(annotation.left)
+            + _collect_concrete_names(annotation.right)
+        )
+
+    if isinstance(annotation, ast.Tuple):
+        # Bare tuple of types (used in some Callable / generic contexts)
+        names: list[str] = []
+        for elt in annotation.elts:
+            names.extend(_collect_concrete_names(elt))
+        return names
+
+    return []
+
+
+def _extract_outer_name(node: ast.expr) -> str | None:
+    """Return the bare name of the outermost generic, e.g. ``Optional`` from ``Optional[X]``."""
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        return node.attr
     return None
+
+
+def _collect_from_slice(slice_node: ast.expr) -> list[str]:
+    """Expand a subscript slice (Name, Tuple of Names, …) into type names."""
+    if isinstance(slice_node, ast.Tuple):
+        names: list[str] = []
+        for elt in slice_node.elts:
+            names.extend(_collect_concrete_names(elt))
+        return names
+    return _collect_concrete_names(slice_node)
+
+
+# Keep a thin compatibility shim used by inheritance checking (single name).
+def _extract_type_name(annotation: ast.expr) -> str | None:
+    """
+    Return *one* representative name from an annotation.
+
+    Prefer ``_collect_concrete_names`` for full analysis; this shim exists
+    for the inheritance-base check where only one name is expected.
+    """
+    names = _collect_concrete_names(annotation)
+    return names[0] if names else None
 
 
 def _is_abstract_method(node: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
@@ -135,22 +210,44 @@ def _is_abstract_method(node: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
 
 def _has_only_pass_or_ellipsis(node: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
     """
-    Return True if the function body contains only ``pass``, ``...``, or a
-    docstring — a strong signal that it is an interface stub.
+    Return True if the function body contains only ``pass``, ``...``,
+    a docstring, or a ``raise`` statement — signals of an interface stub.
     """
     for stmt in node.body:
         if isinstance(stmt, ast.Pass):
             continue
+        if isinstance(stmt, ast.Raise):
+            continue  # raise NotImplementedError(...) or bare raise
         if isinstance(stmt, ast.Expr):
             val = stmt.value
-            # ellipsis literal  (...)
             if isinstance(val, ast.Constant) and val.value is ...:
                 continue
-            # docstring
             if isinstance(val, ast.Constant) and isinstance(val.value, str):
                 continue
         return False
     return True
+
+
+def _raises_not_implemented(node: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
+    """
+    Return True if the function body raises ``NotImplementedError``.
+
+    This distinguishes intentional interface stubs from trivially empty
+    concrete methods (``def noop(self): pass``).
+    """
+    for stmt in node.body:
+        if not isinstance(stmt, ast.Raise) or stmt.exc is None:
+            continue
+        exc = stmt.exc
+        if isinstance(exc, ast.Name) and exc.id == "NotImplementedError":
+            return True
+        if (
+            isinstance(exc, ast.Call)
+            and isinstance(exc.func, ast.Name)
+            and exc.func.id == "NotImplementedError"
+        ):
+            return True
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -204,7 +301,10 @@ def _build_class_registry(tree: ast.Module) -> ClassRegistry:
             if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef))
         )
 
-        # Rule 3 — all non-dunder methods are stubs
+        # Rule 3 — all non-dunder methods are stubs AND at least one raises
+        # NotImplementedError, signalling intentional interface design.
+        # A plain ``pass`` body alone is not sufficient — that's a valid (if
+        # empty) concrete implementation and should not be treated as abstract.
         non_dunder_methods = [
             item for item in node.body
             if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef))
@@ -212,6 +312,8 @@ def _build_class_registry(tree: ast.Module) -> ClassRegistry:
         ]
         all_stubs = bool(non_dunder_methods) and all(
             _has_only_pass_or_ellipsis(m) for m in non_dunder_methods
+        ) and any(
+            _raises_not_implemented(m) for m in non_dunder_methods
         )
 
         # Rule 4 — name convention
@@ -255,7 +357,6 @@ def _is_concrete(typename: str | None, registry: ClassRegistry) -> bool:
         return False
 
     # Assume concrete only if it starts with an uppercase letter
-    # (avoids flagging type variables, plain strings, etc.)
     return bool(typename) and typename[0].isupper()
 
 
@@ -288,7 +389,7 @@ class DipAnalyzer(ast.NodeVisitor):
         self.current_class: str | None = None
         self._current_method: str | None = None
         self._in_method: bool = False
-        self._method_decorator_kinds: set[str] = set()  # "classmethod", "staticmethod"
+        self._method_decorator_kinds: set[str] = set()
         self.violations: list[Violation] = []
         self.registry = registry
 
@@ -301,6 +402,23 @@ class DipAnalyzer(ast.NodeVisitor):
 
     def _add(self, rule: str, line: int, col: int, detail: str) -> None:
         self.violations.append(Violation(self.filename, line, col, f"{rule} {detail}"))
+
+    def _check_annotation(
+        self,
+        annotation: ast.expr,
+        rule: str,
+        line: int,
+        col: int,
+        context_msg: str,
+    ) -> None:
+        """
+        Collect *all* type names from ``annotation`` and emit a violation for
+        each concrete one.  This replaces the old pattern of calling
+        ``_extract_type_name`` (which returned at most one name).
+        """
+        for typename in _collect_concrete_names(annotation):
+            if self._is_concrete(typename):
+                self._add(rule, line, col, context_msg.format(typename=typename))
 
     # ------------------------------------------------------------------
     # Class scope
@@ -325,7 +443,6 @@ class DipAnalyzer(ast.NodeVisitor):
     def _check_class_inheritance(self, node: ast.ClassDef) -> None:
         for base in node.bases:
             typename = _extract_type_name(base)
-            # Exclude known ABC entry points
             if typename in ("ABC", "Protocol", "object", None):
                 continue
             if self._is_concrete(typename):
@@ -341,7 +458,8 @@ class DipAnalyzer(ast.NodeVisitor):
     def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
         self._visit_any_function(node)
 
-    visit_AsyncFunctionDef = visit_FunctionDef  # type: ignore[assignment]
+    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+        self._visit_any_function(node)
 
     def _visit_any_function(
         self,
@@ -358,7 +476,6 @@ class DipAnalyzer(ast.NodeVisitor):
             for d in node.decorator_list
         }
 
-        # Only analyse method signatures when we are directly inside a class
         if self.current_class is not None:
             self._check_method_args(node)
             self._check_return_type(node)
@@ -376,70 +493,64 @@ class DipAnalyzer(ast.NodeVisitor):
         """
         Check every parameter annotation, skipping implicit ``self``/``cls``.
 
-        - instance methods  → skip args[0]  (self)
-        - class methods     → skip args[0]  (cls)
-        - static methods    → skip nothing
+        Covers: positional, keyword-only, positional-only, *args, **kwargs.
         """
         is_static = "staticmethod" in self._method_decorator_kinds
-        is_class_or_instance = not is_static
-
-        all_args = node.args.args
-        args_to_check = all_args[1:] if is_class_or_instance else all_args
-
         rule = "DIP001" if node.name == "__init__" else "DIP002"
 
-        for arg in args_to_check:
-            if arg.annotation is None:
-                continue
-            typename = _extract_type_name(arg.annotation)
-            if self._is_concrete(typename):
-                self._add(
-                    rule, arg.lineno, arg.col_offset,
-                    f"Class '{self.current_class}' depends on concrete class '{typename}' "
-                    f"in '{node.name}'. Use an abstraction instead."
-                )
+        all_positional = node.args.args
+        args_to_check = all_positional if is_static else all_positional[1:]
 
-        # Also check keyword-only args and positional-only args
-        for arg in (*node.args.kwonlyargs, *(node.args.posonlyargs or [])):
+        def _check_arg(arg: ast.arg) -> None:
             if arg.annotation is None:
-                continue
-            typename = _extract_type_name(arg.annotation)
-            if self._is_concrete(typename):
-                self._add(
-                    rule, arg.lineno, arg.col_offset,
-                    f"Class '{self.current_class}' depends on concrete class '{typename}' "
-                    f"in '{node.name}' (keyword/posonly arg). Use an abstraction instead."
-                )
+                return
+            self._check_annotation(
+                arg.annotation, rule, arg.lineno, arg.col_offset,
+                f"Class '{self.current_class}' depends on concrete class '{{typename}}' "
+                f"in '{node.name}'. Use an abstraction instead.",
+            )
+
+        for arg in args_to_check:
+            _check_arg(arg)
+
+        for arg in (*node.args.kwonlyargs, *(node.args.posonlyargs or [])):
+            _check_arg(arg)
+
+        # *args and **kwargs annotations
+        if node.args.vararg and node.args.vararg.annotation:
+            _check_arg(node.args.vararg)
+        if node.args.kwarg and node.args.kwarg.annotation:
+            _check_arg(node.args.kwarg)
 
     def _check_return_type(
         self,
         node: ast.FunctionDef | ast.AsyncFunctionDef,
     ) -> None:
-        if node.returns is None:
+        if node.returns is None or node.name == "__init__":
             return
-        typename = _extract_type_name(node.returns)
-        if self._is_concrete(typename):
-            self._add(
-                "DIP006", node.lineno, node.col_offset,
-                f"Method '{node.name}' in '{self.current_class}' "
-                f"returns concrete class '{typename}'."
-            )
+        # Factory/classmethod pattern: returning the class itself is not a violation.
+        names_to_skip = {self.current_class, "Self"}
+        for typename in _collect_concrete_names(node.returns):
+            if typename in names_to_skip:
+                continue
+            if self._is_concrete(typename):
+                self._add(
+                    "DIP006", node.lineno, node.col_offset,
+                    f"Method '{node.name}' in '{self.current_class}' "
+                    f"returns concrete class '{typename}'.",
+                )
 
     # ------------------------------------------------------------------
     # Attribute annotations  (class-level only, not local variables)
     # ------------------------------------------------------------------
 
     def visit_AnnAssign(self, node: ast.AnnAssign) -> None:
-        # Only flag class-body annotations, not local variable annotations
-        # inside methods. The ``_in_method`` flag distinguishes the two.
         if self.current_class is not None and not self._in_method:
-            typename = _extract_type_name(node.annotation)
-            if self._is_concrete(typename):
-                self._add(
-                    "DIP004", node.lineno, node.col_offset,
-                    f"Class '{self.current_class}' has class-level attribute "
-                    f"annotated with concrete class '{typename}'."
-                )
+            self._check_annotation(
+                node.annotation, "DIP004", node.lineno, node.col_offset,
+                f"Class '{self.current_class}' has class-level attribute "
+                f"annotated with concrete class '{{typename}}'.",
+            )
         self.generic_visit(node)
 
     # ------------------------------------------------------------------
@@ -447,25 +558,25 @@ class DipAnalyzer(ast.NodeVisitor):
     # ------------------------------------------------------------------
 
     def visit_Call(self, node: ast.Call) -> None:
+        # Only check calls that are directly inside a class scope.
         if self.current_class is not None:
             typename = _extract_type_name(node.func)
-            # Skip:  self.current_class itself (factory pattern / __new__)
-            #        super()
-            #        known builtins / typing names
             if (
                 typename
                 and typename not in ("super", self.current_class)
                 and typename not in _BUILTIN_TYPES
                 and self._is_concrete(typename)
             ):
-                rule = "DIP003"
-                context = (
-                    f"__init__" if self._current_method == "__init__"
-                    else f"'{self._current_method}'"
-                ) if self._current_method else "class body"
+                if self._current_method:
+                    context = (
+                        "__init__" if self._current_method == "__init__"
+                        else f"'{self._current_method}'"
+                    )
+                else:
+                    context = "class body"
 
                 self._add(
-                    rule, node.lineno, node.col_offset,
+                    "DIP003", node.lineno, node.col_offset,
                     f"Class '{self.current_class}' directly instantiates concrete "
                     f"class '{typename}' in {context}. Inject via constructor instead."
                 )
@@ -517,7 +628,6 @@ def analyze_directory(
     """
     py_files: list[str] = []
     for root, dirs, files in os.walk(folder):
-        # Prune excluded directories in-place so os.walk won't descend
         dirs[:] = [d for d in dirs if d not in exclude_dirs]
         for fname in files:
             if fname.endswith(".py"):
@@ -574,8 +684,10 @@ def get_dip_report(code_str: str) -> dict[str, object]:
             {"line": v.line, "col": v.col, "message": v.message}
             for v in analyzer.violations
         ],
-        "reason": f"{len(analyzer.violations)} violation(s) found. "
-                f"First: Line {analyzer.violations[0].line}: {analyzer.violations[0].message}",
+        "reason": (
+            f"{len(analyzer.violations)} violation(s) found. "
+            f"First: Line {analyzer.violations[0].line}: {analyzer.violations[0].message}"
+        ),
         "suggestion": (
             "Inject abstractions (interfaces/abstract classes) instead of concrete classes. "
             "Define a Protocol or ABC for each dependency and accept it in __init__."
