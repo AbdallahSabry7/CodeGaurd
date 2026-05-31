@@ -1,3 +1,49 @@
+"""
+clean_code_analyzer.py
+────────────────────────────────────────────────────────────────────────────────
+Python code quality analyzer with two output modes:
+
+  analyze(source)              → compact mode  (agent-facing, ~85% fewer tokens)
+  analyze(source, verbose=True)→ full mode     (human/debug use)
+
+────────────────────────────────────────────────────────────────────────────────
+COMPACT output schema (default — pass to Refactor Agent):
+
+  score    int        0-100
+  grade    str        A/B/C/D/F
+  passed   bool       True when score >= 75
+  counts   str        "{E}E/{W}W/{H}H"  e.g. "2E/3W/5H"
+  fixes    list[str]  one repair token per issue, sorted by severity
+  lloc     int        logical lines of code (proxy for refactor cost)
+  error    str|None   set only on SyntaxError
+
+Fix token format:  {SEV}:{line}:{target}:{rule}[:{detail}]
+  SEV    = E / W / H
+  line   = line number or 0 if unknown
+  target = function/class/variable name, or empty string
+  rule   = rule id
+  detail = optional short value (e.g. depth=5, lines=67, params=a,b)
+
+Example fixes list:
+  ["E:12:calc:deep_nesting:depth=5",
+   "W:45:process_data:function_too_long:lines=67",
+   "W:12:a:param_too_short",
+   "H:12:calc:missing_docstring"]
+
+────────────────────────────────────────────────────────────────────────────────
+VERBOSE output schema (verbose=True — for humans and debugging):
+
+  score, grade, passed         same as compact
+  blocker_count                int
+  warning_count                int
+  hint_count                   int
+  issues   list[dict]          full issue objects (id, cat, sev, line, target, msg, penalty)
+  metrics  dict                loc, lloc, comments, maintainability_index, cc_max
+  pylint   list[dict]          raw pylint output (line, symbol, msg, type)
+  parse_error  str|None
+────────────────────────────────────────────────────────────────────────────────
+"""
+
 from __future__ import annotations
 
 import ast
@@ -8,119 +54,175 @@ import subprocess
 import sys
 import tempfile
 from dataclasses import dataclass, field
-from typing import List
-
-from radon.complexity import cc_visit
-from radon.metrics import mi_visit
-from radon.raw import analyze as radon_analyze
+from typing import List, Optional
 
 
 # ── thresholds ────────────────────────────────────────────────────────────────
 
-MAX_FUNCTION_LINES   = 20   # lines per function before penalty
-MAX_NESTING_DEPTH    = 3    # if-for-while nesting levels
-MAX_PARAMS           = 4    # parameters per function
-MAX_CC               = 5    # cyclomatic complexity per function
-MIN_NAME_LENGTH      = 3    # minimum identifier length (excl. loop vars i/j/k/x)
-MAGIC_NUMBER_IGNORE  = frozenset({0, 1, -1, 2, 100})  # universally understood
-LOOP_VAR_WHITELIST   = frozenset({"i", "j", "k", "x", "y", "z", "n", "m", "_"})
+MAX_FUNCTION_LINES  = 40
+MAX_NESTING_DEPTH   = 4
+MAX_PARAMS          = 5
+MAX_CC              = 10
+MIN_NAME_LENGTH     = 2
+MAGIC_IGNORE        = frozenset({0, 1, -1, 2, 100})
+LOOP_VAR_OK         = frozenset({"i", "j", "k", "x", "y", "z", "n", "m", "_"})
+
+# Penalty → severity mapping
+def _sev(penalty: int) -> str:
+    if penalty >= 12:
+        return "error"
+    if penalty >= 6:
+        return "warning"
+    return "hint"
 
 
 # ── issue dataclass ───────────────────────────────────────────────────────────
 
 @dataclass
 class Issue:
-    category: str        # e.g. "naming", "complexity", "style"
-    rule: str            # short rule id, e.g. "short_name"
-    message: str         # human-readable explanation
-    line: int | None = None
-    penalty: int = 0     # points deducted from 100
+    cat:     str
+    id:      str
+    msg:     str
+    penalty: int
+    line:    Optional[int] = None
+    target:  Optional[str] = None
+
+    @property
+    def sev(self) -> str:
+        return _sev(self.penalty)
+
+    def to_fix_token(self) -> str:
+        """
+        Compact repair token for the Refactor Agent.
+        Format: {SEV}:{line}:{target}:{rule}[:{detail}]
+        """
+        sev_char = {"error": "E", "warning": "W", "hint": "H"}[self.sev]
+        line     = self.line or 0
+        target   = self.target or ""
+        detail   = self._detail()
+        if detail:
+            return f"{sev_char}:{line}:{target}:{self.id}:{detail}"
+        return f"{sev_char}:{line}:{target}:{self.id}"
+
+    def _detail(self) -> str:
+        """Extract the single most useful numeric/name value from the message."""
+        import re
+        # depth=N  (nesting)
+        m = re.search(r"(\d+) nesting", self.msg)
+        if m: return f"depth={m.group(1)}"
+        # lines=N  (function length or file lines)
+        m = re.search(r"(\d+) lines", self.msg)
+        if m: return f"lines={m.group(1)}"
+        # count=N  (params)
+        m = re.search(r"(\d+) params", self.msg)
+        if m: return f"count={m.group(1)}"
+        # CC value
+        m = re.search(r"CC=(\d+)", self.msg)
+        if m: return f"cc={m.group(1)}"
+        # missing type hints param list
+        m = re.search(r"hints on: (.+)\.", self.msg)
+        if m: return m.group(1).replace(", ", ",")
+        # magic number value
+        m = re.search(r"Magic number ([^\s;]+)", self.msg)
+        if m: return f"val={m.group(1)}"
+        # augmented assign operator
+        m = re.search(r"use '(\S+)'", self.msg)
+        if m: return f"use={m.group(1)}"
+        return ""
+
+    def to_dict(self) -> dict:
+        """Full verbose dict for human/debug output."""
+        return {
+            "id":      self.id,
+            "cat":     self.cat,
+            "sev":     self.sev,
+            "line":    self.line,
+            "target":  self.target,
+            "msg":     self.msg,
+            "penalty": self.penalty,
+        }
 
 
-# ── individual checks ─────────────────────────────────────────────────────────
+# ── helpers ───────────────────────────────────────────────────────────────────
+
+_is_snake  = re.compile(r"^[a-z_][a-z0-9_]*$")
+_is_pascal = re.compile(r"^[A-Z][a-zA-Z0-9]*$")
+
+
+def _has_string_concat(node: ast.AST) -> bool:
+    if not isinstance(node, ast.BinOp) or not isinstance(node.op, ast.Add):
+        return False
+
+    def _has_str(n: ast.AST) -> bool:
+        for child in ast.walk(n):
+            if isinstance(child, ast.Constant) and isinstance(child.value, str):
+                return True
+            if (isinstance(child, ast.Call)
+                    and isinstance(child.func, ast.Name)
+                    and child.func.id == "str"):
+                return True
+        return False
+
+    return _has_str(node.left) or _has_str(node.right)
+
+
+# ── checks ────────────────────────────────────────────────────────────────────
 
 def _check_naming(tree: ast.AST) -> List[Issue]:
     issues: List[Issue] = []
-    is_snake  = re.compile(r'^[a-z_][a-z0-9_]*$')
-    is_pascal = re.compile(r'^[A-Z][a-zA-Z0-9]*$')
 
     for node in ast.walk(tree):
 
-        # ── functions ──────────────────────────────────────────────────────
         if isinstance(node, ast.FunctionDef):
-            name = node.name
-            line = node.lineno
-
+            name, line = node.name, node.lineno
             if len(name) < MIN_NAME_LENGTH:
-                issues.append(Issue(
-                    "naming", "short_name",
-                    f"Function '{name}' is too short ({len(name)} chars). "
-                    f"Use a descriptive name that explains what it does.",
-                    line, penalty=15
-                ))
-            elif not is_snake.match(name):
-                issues.append(Issue(
-                    "naming", "not_snake_case",
-                    f"Function '{name}' should be snake_case (e.g. 'validate_password').",
-                    line, penalty=10
-                ))
+                issues.append(Issue("naming", "name_too_short",
+                    f"Function name '{name}' is too short; use a descriptive verb phrase.",
+                    15, line, name))
+            elif not _is_snake.match(name):
+                issues.append(Issue("naming", "func_not_snake_case",
+                    f"Function '{name}' must be snake_case.",
+                    10, line, name))
 
-            # parameters
             for arg in node.args.args:
-                aname = arg.arg
-                if aname == "self":
+                a = arg.arg
+                if a == "self":
                     continue
-                if len(aname) < MIN_NAME_LENGTH and aname not in LOOP_VAR_WHITELIST:
-                    issues.append(Issue(
-                        "naming", "short_param",
-                        f"Parameter '{aname}' in '{name}' is too short. "
-                        f"Single-letter params make code unreadable without context.",
-                        line, penalty=10
-                    ))
-                elif not is_snake.match(aname):
-                    issues.append(Issue(
-                        "naming", "param_not_snake",
-                        f"Parameter '{aname}' in '{name}' should be snake_case.",
-                        line, penalty=5
-                    ))
+                if len(a) < MIN_NAME_LENGTH and a not in LOOP_VAR_OK:
+                    issues.append(Issue("naming", "param_too_short",
+                        f"Param '{a}' in '{name}' is too short; single-letter params obscure intent.",
+                        10, line, a))
+                elif not _is_snake.match(a):
+                    issues.append(Issue("naming", "param_not_snake_case",
+                        f"Param '{a}' in '{name}' must be snake_case.",
+                        5, line, a))
 
-        # ── classes ────────────────────────────────────────────────────────
         elif isinstance(node, ast.ClassDef):
-            if not is_pascal.match(node.name):
-                issues.append(Issue(
-                    "naming", "not_pascal_case",
-                    f"Class '{node.name}' should be PascalCase (e.g. 'OrderProcessor').",
-                    node.lineno, penalty=10
-                ))
+            if not _is_pascal.match(node.name):
+                issues.append(Issue("naming", "class_not_pascal_case",
+                    f"Class '{node.name}' must be PascalCase.",
+                    10, node.lineno, node.name))
 
-        # ── variables ──────────────────────────────────────────────────────
         elif isinstance(node, ast.Assign):
-            for target in node.targets:
-                if not isinstance(target, ast.Name):
+            for t in node.targets:
+                if not isinstance(t, ast.Name):
                     continue
-                vname = target.id
-                if vname.isupper():          # CONSTANT — OK
+                v = t.id
+                if v.isupper() or v in LOOP_VAR_OK:
                     continue
-                if vname in LOOP_VAR_WHITELIST:
-                    continue
-                if len(vname) < MIN_NAME_LENGTH:
-                    issues.append(Issue(
-                        "naming", "short_variable",
-                        f"Variable '{vname}' is too short. "
-                        f"Choose a name that reveals intent (e.g. 'total' not 't').",
-                        node.lineno, penalty=8
-                    ))
-                elif not is_snake.match(vname):
-                    issues.append(Issue(
-                        "naming", "variable_not_snake",
-                        f"Variable '{vname}' should be snake_case.",
-                        node.lineno, penalty=5
-                    ))
+                if len(v) < MIN_NAME_LENGTH:
+                    issues.append(Issue("naming", "var_too_short",
+                        f"Variable '{v}' is too short; choose a name that reveals intent.",
+                        8, node.lineno, v))
+                elif not _is_snake.match(v):
+                    issues.append(Issue("naming", "var_not_snake_case",
+                        f"Variable '{v}' must be snake_case.",
+                        5, node.lineno, v))
 
     return issues
 
 
-def _check_function_design(tree: ast.AST) -> List[Issue]:
+def _check_functions(tree: ast.AST) -> List[Issue]:
     issues: List[Issue] = []
 
     for node in ast.walk(tree):
@@ -129,27 +231,18 @@ def _check_function_design(tree: ast.AST) -> List[Issue]:
         name  = node.name
         line  = node.lineno
         length = (node.end_lineno or line) - line + 1
-
-        # ── too long ───────────────────────────────────────────────────────
-        if length > MAX_FUNCTION_LINES:
-            issues.append(Issue(
-                "function_design", "function_too_long",
-                f"Function '{name}' is {length} lines long (limit: {MAX_FUNCTION_LINES}). "
-                f"Extract logical sub-steps into helper functions.",
-                line, penalty=10
-            ))
-
-        # ── too many parameters ────────────────────────────────────────────
         params = [a for a in node.args.args if a.arg != "self"]
-        if len(params) > MAX_PARAMS:
-            issues.append(Issue(
-                "function_design", "too_many_params",
-                f"Function '{name}' has {len(params)} parameters (limit: {MAX_PARAMS}). "
-                f"Consider grouping related params into a dataclass or dict.",
-                line, penalty=10
-            ))
 
-        # ── missing docstring ──────────────────────────────────────────────
+        if length > MAX_FUNCTION_LINES:
+            issues.append(Issue("function_design", "function_too_long",
+                f"'{name}' is {length} lines (limit {MAX_FUNCTION_LINES}); extract helpers.",
+                10, line, name))
+
+        if len(params) > MAX_PARAMS:
+            issues.append(Issue("function_design", "too_many_params",
+                f"'{name}' has {len(params)} params (limit {MAX_PARAMS}); group into dataclass.",
+                10, line, name))
+
         has_doc = (
             node.body
             and isinstance(node.body[0], ast.Expr)
@@ -157,28 +250,20 @@ def _check_function_design(tree: ast.AST) -> List[Issue]:
             and isinstance(node.body[0].value.value, str)
         )
         if not has_doc and not name.startswith("_"):
-            issues.append(Issue(
-                "function_design", "missing_docstring",
-                f"Function '{name}' has no docstring. "
-                f"Add a one-line summary of what it does and what it returns.",
-                line, penalty=5
-            ))
+            issues.append(Issue("docs", "missing_docstring",
+                f"'{name}' has no docstring.",
+                5, line, name))
 
-        # ── missing type hints ─────────────────────────────────────────────
         untyped = [a.arg for a in params if a.annotation is None]
         if untyped:
-            issues.append(Issue(
-                "function_design", "missing_type_hints",
-                f"Function '{name}' is missing type hints for: {', '.join(untyped)}. "
-                f"Type hints improve readability and catch bugs early.",
-                line, penalty=5
-            ))
+            issues.append(Issue("types", "missing_param_types",
+                f"'{name}' missing type hints on: {', '.join(untyped)}.",
+                5, line, name))
+
         if node.returns is None and not name.startswith("_"):
-            issues.append(Issue(
-                "function_design", "missing_return_hint",
-                f"Function '{name}' has no return type annotation.",
-                line, penalty=3
-            ))
+            issues.append(Issue("types", "missing_return_type",
+                f"'{name}' has no return type annotation.",
+                3, line, name))
 
     return issues
 
@@ -199,35 +284,24 @@ def _check_nesting(tree: ast.AST) -> List[Issue]:
         if isinstance(node, ast.FunctionDef):
             depth = _depth(node)
             if depth > MAX_NESTING_DEPTH:
-                issues.append(Issue(
-                    "complexity", "deep_nesting",
-                    f"Function '{node.name}' has {depth} levels of nesting "
-                    f"(limit: {MAX_NESTING_DEPTH}). "
-                    f"Use early returns, guard clauses, or extract helper functions "
-                    f"to flatten the structure.",
-                    node.lineno, penalty=12
-                ))
+                issues.append(Issue("complexity", "deep_nesting",
+                    f"'{node.name}' has {depth} nesting levels (limit {MAX_NESTING_DEPTH}); use early returns.",
+                    12, node.lineno, node.name))
 
     return issues
 
 
-def _check_cyclomatic_complexity(source: str) -> List[Issue]:
+def _check_cc(source: str) -> List[Issue]:
     issues: List[Issue] = []
     try:
-        blocks = cc_visit(source)
+        from radon.complexity import cc_visit
+        for block in cc_visit(source):
+            if block.complexity > MAX_CC:
+                issues.append(Issue("complexity", "high_cyclomatic_complexity",
+                    f"'{block.name}' CC={block.complexity} (limit {MAX_CC}); split into smaller functions.",
+                    10, block.lineno, block.name))
     except Exception:
-        return issues
-
-    for block in blocks:
-        if block.complexity > MAX_CC:
-            issues.append(Issue(
-                "complexity", "high_cyclomatic_complexity",
-                f"Function '{block.name}' has cyclomatic complexity {block.complexity} "
-                f"(limit: {MAX_CC}). High complexity means many decision paths — "
-                f"split into smaller focused functions.",
-                block.lineno, penalty=10
-            ))
-
+        pass
     return issues
 
 
@@ -236,22 +310,18 @@ def _check_style(tree: ast.AST) -> List[Issue]:
 
     for node in ast.walk(tree):
 
-        # ── range(len(x)) antipattern ──────────────────────────────────────
+        # range(len(...)) antipattern
         if isinstance(node, ast.Call):
             if isinstance(node.func, ast.Name) and node.func.id == "range":
                 if (node.args
                         and isinstance(node.args[0], ast.Call)
                         and isinstance(node.args[0].func, ast.Name)
                         and node.args[0].func.id == "len"):
-                    issues.append(Issue(
-                        "style", "range_len_antipattern",
-                        f"'range(len(...))' at line {getattr(node, 'lineno', '?')} — "
-                        f"use 'enumerate()' when you need the index, "
-                        f"or iterate directly over the collection.",
-                        getattr(node, "lineno", None), penalty=5
-                    ))
+                    issues.append(Issue("style", "range_len_antipattern",
+                        "Use enumerate() or iterate directly instead of range(len(...)).",
+                        5, getattr(node, "lineno", None)))
 
-        # ── x = x + y instead of x += y ───────────────────────────────────
+        # x = x + y  →  x += y
         if isinstance(node, ast.Assign):
             rhs = node.value
             if isinstance(rhs, ast.BinOp) and isinstance(rhs.op, (ast.Add, ast.Sub, ast.Mult)):
@@ -259,85 +329,48 @@ def _check_style(tree: ast.AST) -> List[Issue]:
                     if (isinstance(t, ast.Name)
                             and isinstance(rhs.left, ast.Name)
                             and t.id == rhs.left.id):
-                        op_sym = {ast.Add: "+=", ast.Sub: "-=", ast.Mult: "*="}[type(rhs.op)]
-                        issues.append(Issue(
-                            "style", "use_augmented_assign",
-                            f"'{t.id} = {t.id} ...' at line {node.lineno} — "
-                            f"use '{op_sym}' for clarity.",
-                            node.lineno, penalty=3
-                        ))
+                        op = {ast.Add: "+=", ast.Sub: "-=", ast.Mult: "*="}[type(rhs.op)]
+                        issues.append(Issue("style", "use_augmented_assign",
+                            f"Replace '{t.id} = {t.id} ...' with '{op}'.",
+                            3, node.lineno, t.id))
 
-        # ── magic numbers ──────────────────────────────────────────────────
+        # magic numbers
         if isinstance(node, (ast.Compare, ast.BinOp, ast.Assign)):
-            # Skip if this is a CONSTANT = value assignment (ALL_CAPS)
             if isinstance(node, ast.Assign):
-                is_const_assign = any(
-                    isinstance(t, ast.Name) and t.id.isupper()
-                    for t in node.targets
-                )
-                if is_const_assign:
+                if any(isinstance(t, ast.Name) and t.id.isupper() for t in node.targets):
                     continue
-
-            nums = []
+            seen_nums: set = set()
             for child in ast.walk(node):
                 if (isinstance(child, ast.Constant)
                         and isinstance(child.value, (int, float))
-                        and child.value not in MAGIC_NUMBER_IGNORE):
-                    nums.append(child.value)
-            for num in set(nums):
-                issues.append(Issue(
-                    "style", "magic_number",
-                    f"Magic number '{num}' at line {getattr(node, 'lineno', '?')} — "
-                    f"assign it to a named constant (e.g. MIN_VALUE = {num}).",
-                    getattr(node, "lineno", None), penalty=4
-                ))
+                        and child.value not in MAGIC_IGNORE):
+                    seen_nums.add(child.value)
+            for num in seen_nums:
+                issues.append(Issue("style", "magic_number",
+                    f"Magic number {num}; assign to a named constant.",
+                    4, getattr(node, "lineno", None)))
 
-        # ── string concatenation with + in print/assign ────────────────────
+        # string concat in print()
         if isinstance(node, ast.Call):
             if isinstance(node.func, ast.Name) and node.func.id == "print":
                 for arg in node.args:
                     if _has_string_concat(arg):
-                        issues.append(Issue(
-                            "style", "string_concat_in_print",
-                            f"String concatenation with '+' in print() at line "
-                            f"{getattr(node, 'lineno', '?')} — use an f-string instead.",
-                            getattr(node, "lineno", None), penalty=3
-                        ))
+                        issues.append(Issue("style", "string_concat_in_print",
+                            "Use an f-string instead of '+' concatenation in print().",
+                            3, getattr(node, "lineno", None)))
 
     return issues
 
 
-def _has_string_concat(node: ast.AST) -> bool:
-    """Return True if the node is a BinOp chain that mixes str() calls or Str constants."""
-    if not isinstance(node, ast.BinOp) or not isinstance(node.op, ast.Add):
-        return False
-    def _has_str(n: ast.AST) -> bool:
-        for child in ast.walk(n):
-            if isinstance(child, ast.Constant) and isinstance(child.value, str):
-                return True
-            if (isinstance(child, ast.Call)
-                    and isinstance(child.func, ast.Name)
-                    and child.func.id == "str"):
-                return True
-        return False
-    return _has_str(node.left) or _has_str(node.right)
-
-
-def _check_comments(source: str, tree: ast.AST) -> List[Issue]:
-    issues: List[Issue] = []
+def _check_comments(source: str) -> List[Issue]:
     lines = source.splitlines()
-    total_lines = len(lines)
-    comment_lines = sum(1 for l in lines if l.strip().startswith("#"))
-
-    if total_lines > 10 and comment_lines == 0:
-        issues.append(Issue(
-            "documentation", "no_comments",
-            f"No inline comments found in {total_lines}-line file. "
-            f"Add comments to explain non-obvious logic, not what the code does.",
-            penalty=5
-        ))
-
-    return issues
+    total = len(lines)
+    comments = sum(1 for l in lines if l.strip().startswith("#"))
+    if total > 10 and comments == 0:
+        return [Issue("docs", "no_inline_comments",
+            f"File has {total} lines but zero inline comments; document non-obvious logic.",
+            5)]
+    return []
 
 
 def _run_pylint(source: str) -> list:
@@ -346,33 +379,29 @@ def _run_pylint(source: str) -> list:
             delete=False, suffix=".py", mode="w", encoding="utf-8"
         ) as tmp:
             tmp.write(source)
-            tmp_path = tmp.name
+            path = tmp.name
 
-        process = subprocess.run(
-            [sys.executable, "-m", "pylint", tmp_path,
+        proc = subprocess.run(
+            [sys.executable, "-m", "pylint", path,
              "--output-format=json", "--disable=all", "--enable=C,R,W",
              "--disable=C0114,C0116,C0115"],
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
         )
-        os.remove(tmp_path)
+        os.remove(path)
 
-        if process.stdout:
-            raw = json.loads(process.stdout)
-            # Deduplicate and trim to most useful fields
-            seen = set()
-            cleaned = []
-            for msg in raw:
-                key = (msg.get("message-id"), msg.get("line"))
+        if proc.stdout:
+            seen, out = set(), []
+            for m in json.loads(proc.stdout):
+                key = (m.get("message-id"), m.get("line"))
                 if key not in seen:
                     seen.add(key)
-                    cleaned.append({
-                        "line": msg.get("line"),
-                        "message_id": msg.get("message-id"),
-                        "symbol": msg.get("symbol"),
-                        "message": msg.get("message"),
-                        "type": msg.get("type"),
+                    out.append({
+                        "line":    m.get("line"),
+                        "symbol":  m.get("symbol"),
+                        "msg":     m.get("message"),
+                        "type":    m.get("type"),
                     })
-            return cleaned
+            return out
     except Exception:
         pass
     return []
@@ -380,195 +409,203 @@ def _run_pylint(source: str) -> list:
 
 # ── scoring ───────────────────────────────────────────────────────────────────
 
-def _compute_score(issues: List[Issue], mi: float) -> tuple[int, str]:
-    """Return (score 0-100, grade letter) factoring in issue penalties and MI."""
-    penalty = sum(i.penalty for i in issues)
+def _score(issues: List[Issue], mi: float) -> tuple[int, str]:
+    """
+    Category-capped scoring
+    ───────────────────────
+    Each issue category has a ceiling — the maximum points it can ever deduct,
+    regardless of how many individual violations exist.  This prevents docs/type
+    issues from drowning out real structural problems and makes the score stable
+    as a codebase grows.
 
-    # MI contributes up to 10 points bonus/malus
-    # MI range: 0 (unmaintainable) – 100 (perfect). Normalize to 0-10.
-    mi_bonus = round((min(max(mi, 0), 100) / 100) * 10)
+    Category ceilings (points deducted from 100):
+      complexity  → up to 30   deep nesting, CC, long functions
+      naming      → up to 15   snake_case, short names
+      function    → up to 15   too many params, too long
+      docs        → up to 10   missing docstrings (presence, not count)
+      types       → up to 10   missing type hints  (presence, not count)
+      style       → up to 10   magic numbers, augmented assign, range(len)
+      syntax      → 100        parse error = instant F
 
-    score = max(0, min(100, 100 - penalty + mi_bonus - 5))  # -5 baseline MI offset
+    Grade thresholds:
+      A  90-100   clean, production-ready
+      B  75-89    minor issues, mostly docs/style
+      C  55-74    real structural issues present
+      D  35-54    significant problems
+      F   0-34    broken or heavily flawed
+
+    A single error-severity issue (nesting/CC) caps the grade at B.
+    Two or more error issues cap at C.
+    """
+    CATEGORY_CAPS = {
+        "syntax":          100,
+        "complexity":       30,
+        "function_design":  15,
+        "naming":           15,
+        "style":            10,
+        "docs":             10,
+        "types":            10,
+    }
+
+    # Sum raw penalties per category, then clamp each to its ceiling
+    cat_raw: dict[str, int] = {}
+    for iss in issues:
+        cat_raw[iss.cat] = cat_raw.get(iss.cat, 0) + iss.penalty
+
+    total_deduction = sum(
+        min(raw, CATEGORY_CAPS.get(cat, 10))
+        for cat, raw in cat_raw.items()
+    )
+
+    mi_bonus = round((min(max(mi, 0), 100) / 100) * 5)   # 0-5 pts
+    score    = max(0, min(100, 100 - total_deduction + mi_bonus))
+
+    error_count = sum(1 for i in issues if i.sev == "error")
 
     if score >= 90:
         grade = "A"
     elif score >= 75:
         grade = "B"
-    elif score >= 60:
+    elif score >= 55:
         grade = "C"
-    elif score >= 40:
+    elif score >= 35:
         grade = "D"
     else:
         grade = "F"
 
+    # Structural errors cap the grade regardless of numeric score
+    if error_count >= 2 and grade in ("A", "B"):
+        grade = "C"
+    elif error_count == 1 and grade == "A":
+        grade = "B"
+
     return score, grade
-
-
-def _grade_summary(score: int, grade: str, issues: List[Issue]) -> str:
-    category_counts: dict[str, int] = {}
-    for issue in issues:
-        category_counts[issue.category] = category_counts.get(issue.category, 0) + 1
-
-    parts = []
-    if not issues:
-        parts.append("No issues detected.")
-    else:
-        for cat, count in category_counts.items():
-            parts.append(f"{count} {cat.replace('_', ' ')} issue(s)")
-
-    summary = f"Score {score}/100 (Grade {grade}). " + ", ".join(parts) + "."
-    return summary
 
 
 # ── public API ────────────────────────────────────────────────────────────────
 
-def analyze_code_string(code_string: str) -> dict:
-    empty_result = {
-        "clean_code_score": 100,
-        "grade": "A",
-        "summary": "No code provided.",
-        "issues": [],
-        "radon": {
-            "maintainability_index": 100.0,
-            "raw_metrics": {"total_lines_of_code": 0, "logical_lines_of_code": 0, "comments": 0}
-        },
-        "pylint": []
+def analyze(source: str, verbose: bool = False) -> dict:
+    """
+    Analyze Python source and return a quality report.
+
+    Parameters
+    ----------
+    source  : str   Raw Python source code.
+    verbose : bool  False (default) → compact agent output (~85% fewer tokens).
+                    True            → full output for humans and debugging.
+    """
+    _empty_metrics = {
+        "loc": 0, "lloc": 0, "comments": 0,
+        "maintainability_index": 100.0, "cc_max": 0,
     }
 
-    if not code_string.strip():
-        return empty_result
+    if not source.strip():
+        if verbose:
+            return {
+                "score": 100, "grade": "A", "passed": True,
+                "blocker_count": 0, "warning_count": 0, "hint_count": 0,
+                "issues": [], "metrics": _empty_metrics,
+                "pylint": [], "parse_error": None,
+            }
+        return {"score": 100, "grade": "A", "passed": True,
+                "counts": "0E/0W/0H", "fixes": [], "lloc": 0, "error": None}
 
-    # Parse once, reuse
+    # Parse
     try:
-        tree = ast.parse(code_string)
+        tree = ast.parse(source)
     except SyntaxError as e:
-        return {
-            **empty_result,
-            "clean_code_score": 0,
-            "grade": "F",
-            "summary": f"Syntax error — code could not be parsed: {e}",
-            "issues": [{"category": "syntax", "rule": "syntax_error",
-                        "message": str(e), "line": e.lineno, "penalty": 100}]
-        }
+        err = f"SyntaxError:{e.lineno}:{e.msg}"
+        if verbose:
+            return {
+                "score": 0, "grade": "F", "passed": False,
+                "blocker_count": 1, "warning_count": 0, "hint_count": 0,
+                "issues": [{"id": "syntax_error", "cat": "syntax", "sev": "error",
+                            "line": e.lineno, "target": None,
+                            "msg": f"SyntaxError: {e.msg}", "penalty": 100}],
+                "metrics": _empty_metrics, "pylint": [], "parse_error": str(e),
+            }
+        return {"score": 0, "grade": "F", "passed": False,
+                "counts": "1E/0W/0H", "fixes": [err], "lloc": 0, "error": str(e)}
 
-    # Collect all issues
+    # Collect issues, then deduplicate by (id, line, target)
     all_issues: List[Issue] = []
     all_issues += _check_naming(tree)
-    all_issues += _check_function_design(tree)
+    all_issues += _check_functions(tree)
     all_issues += _check_nesting(tree)
-    all_issues += _check_cyclomatic_complexity(code_string)
+    all_issues += _check_cc(source)
     all_issues += _check_style(tree)
-    all_issues += _check_comments(code_string, tree)
+    all_issues += _check_comments(source)
 
-    # Radon
+    seen_keys: set = set()
+    deduped: List[Issue] = []
+    for iss in all_issues:
+        key = (iss.id, iss.line, iss.target)
+        if key not in seen_keys:
+            seen_keys.add(key)
+            deduped.append(iss)
+    all_issues = deduped
+
+    # Radon metrics
     mi = 100.0
-    raw_metrics = {"total_lines_of_code": 0, "logical_lines_of_code": 0, "comments": 0}
+    cc_max = 0
+    raw_loc = raw_lloc = raw_comments = 0
     try:
-        mi = mi_visit(code_string, multi=True)
-        raw = radon_analyze(code_string)
-        raw_metrics = {
-            "total_lines_of_code": raw.loc,
-            "logical_lines_of_code": raw.lloc,
-            "comments": raw.comments,
-        }
+        from radon.metrics import mi_visit
+        from radon.raw import analyze as radon_raw
+        from radon.complexity import cc_visit
+        mi       = mi_visit(source, multi=True)
+        raw      = radon_raw(source)
+        raw_loc, raw_lloc, raw_comments = raw.loc, raw.lloc, raw.comments
+        cc_max   = max((b.complexity for b in cc_visit(source)), default=0)
     except Exception:
         pass
 
-    score, grade = _compute_score(all_issues, mi)
-    summary = _grade_summary(score, grade, all_issues)
+    score, grade = _score(all_issues, mi)
 
+    # Sort: errors first, then warnings, then hints; ties broken by penalty desc
+    _sev_order = {"error": 0, "warning": 1, "hint": 2}
+    sorted_issues = sorted(
+        all_issues,
+        key=lambda i: (_sev_order[i.sev], -i.penalty)
+    )
+
+    e_count = sum(1 for i in sorted_issues if i.sev == "error")
+    w_count = sum(1 for i in sorted_issues if i.sev == "warning")
+    h_count = sum(1 for i in sorted_issues if i.sev == "hint")
+
+    if verbose:
+        return {
+            "score":         score,
+            "grade":         grade,
+            "passed":        score >= 75,
+            "blocker_count": e_count,
+            "warning_count": w_count,
+            "hint_count":    h_count,
+            "issues":        [i.to_dict() for i in sorted_issues],
+            "metrics": {
+                "loc":                   raw_loc,
+                "lloc":                  raw_lloc,
+                "comments":              raw_comments,
+                "maintainability_index": round(mi, 1),
+                "cc_max":                cc_max,
+            },
+            "pylint":      _run_pylint(source),
+            "parse_error": None,
+        }
+
+    # ── compact mode ──────────────────────────────────────────────────────────
     return {
-        "clean_code_score": score,
-        "grade": grade,
-        "summary": summary,
-        "issues": [
-            {
-                "category": i.category,
-                "rule": i.rule,
-                "line": i.line,
-                "message": i.message,
-                "penalty": i.penalty,
-            }
-            for i in all_issues
-        ],
-        "radon": {
-            "maintainability_index": round(mi, 2),
-            "raw_metrics": raw_metrics,
-        },
-        "pylint": _run_pylint(code_string),
+        "score":  score,
+        "grade":  grade,
+        "passed": score >= 75,
+        "counts": f"{e_count}E/{w_count}W/{h_count}H",
+        "fixes":  [i.to_fix_token() for i in sorted_issues],
+        "lloc":   raw_lloc,
+        "error":  None,
     }
 
 
-# ── CLI smoke test ─────────────────────────────────────────────────────────────
+# ── backward-compat alias ─────────────────────────────────────────────────────
 
-if __name__ == "__main__":
-    snippet1 = '''
-def pv(u, p, ul):
-    for i in ul:
-        if i[0] == u:
-            if i[1] == p:
-                if len(p) >= 8:
-                    if any(c.isupper() for c in p):
-                        if any(c.isdigit() for c in p):
-                            return True
-                        else:
-                            return False
-                    else:
-                        return False
-                else:
-                    return False
-            else:
-                return False
-    return False
-
-ul = [("ahmed", "Password1"), ("sara", "weakpass")]
-print(pv("ahmed", "Password1", ul))
-print(pv("sara", "weakpass", ul))
-'''
-
-    snippet1_refactored = '''
-from typing import List, Tuple
-
-MIN_PASSWORD_LENGTH = 8
-
-def validate_password(password: str) -> bool:
-    """Check if password meets minimum security requirements."""
-    if len(password) < MIN_PASSWORD_LENGTH:
-        return False
-    if not any(c.isupper() for c in password):
-        return False
-    if not any(c.isdigit() for c in password):
-        return False
-    return True
-
-def find_user(users: List[Tuple[str, str]], username: str, password: str) -> bool:
-    """Check if username and password match a registered user."""
-    for user, pwd in users:
-        if user == username and pwd == password:
-            return True
-    return False
-
-def authenticate_user(username: str, password: str, users: List[Tuple[str, str]]) -> bool:
-    """Validate user credentials against registered users list."""
-    if not find_user(users, username, password):
-        return False
-    return validate_password(password)
-
-users = [("ahmed", "Password1"), ("sara", "weakpass")]
-print(authenticate_user("ahmed", "Password1", users))
-print(authenticate_user("sara", "weakpass", users))
-'''
-
-    for label, code in [("ORIGINAL", snippet1), ("REFACTORED", snippet1_refactored)]:
-        print(f"\n{'='*60}")
-        print(f"  {label}")
-        print('='*60)
-        result = analyze_code_string(code)
-        print(f"Score  : {result['clean_code_score']}/100  (Grade {result['grade']})")
-        print(f"Summary: {result['summary']}")
-        print(f"MI     : {result['radon']['maintainability_index']}")
-        if result["issues"]:
-            print(f"\nIssues ({len(result['issues'])}):")
-            for iss in result["issues"]:
-                line_str = f"line {iss['line']}" if iss["line"] else "global"
-                print(f"  [{iss['category']}] -{iss['penalty']}pt | {line_str} | {iss['message']}")
+def analyze_code_string(code_string: str, verbose: bool = False) -> dict:
+    return analyze(code_string, verbose=verbose)

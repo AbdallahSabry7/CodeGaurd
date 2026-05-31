@@ -46,6 +46,7 @@ def _refactor_prompt(instruction: str, inputs: list[str], extra_rules: list[str]
         *extra_rules,
         "",
         "## Output",
+        "- do not include any text other than the refactored code",
         "- Output the complete refactored Python source code only.",
         "- No explanations, no commentary, no fix lists.",
         "- Do not wrap the code in markdown fences (no ```python or ```).",
