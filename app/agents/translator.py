@@ -10,7 +10,7 @@ from prompts import (
     PYTHON_TO_JAVA_PROMPT,
     SYNTAX_ERROR_PROMPT,
 )
-from llms import LLM
+from llms import translator_llm
 
 _INTO_PYTHON = {"cpp": CPP_TO_PYTHON_PROMPT, "java": JAVA_TO_PYTHON_PROMPT}
 _OUT_OF_PYTHON = {"cpp": PYTHON_TO_CPP_PROMPT, "java": PYTHON_TO_JAVA_PROMPT}
@@ -25,9 +25,9 @@ def _run_translator(code: str, prompt: str, error: str | None = None):
     user = f"Code:\n{code}"
     if error:
         user += f"\n\nErrors:\n{error}"
-    response = LLM.invoke([SystemMessage(content=prompt), HumanMessage(content=user)])
+    response = translator_llm.invoke([SystemMessage(content=prompt), HumanMessage(content=user)])
     if not response.content:
-        raise ValueError("LLM did not return any content in the response.")
+        raise ValueError("translator_llm did not return any content in the response.")
     return _strip_fences(response.content), response
 
 

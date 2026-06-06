@@ -2,7 +2,7 @@ from langchain_core.messages import SystemMessage, HumanMessage
 
 from schemas import AgentState
 from prompts import COMPARATOR_PROMPT
-from llms import LLM3
+from llms import comparator_llm
 
 
 def comparator_agent(state: AgentState) -> AgentState:
@@ -17,9 +17,9 @@ def comparator_agent(state: AgentState) -> AgentState:
             "</refactored_report>"
         )),
     ]
-    response = LLM3.invoke(messages)
+    response = comparator_llm.invoke(messages)
     if not response.content:
-        raise ValueError("LLM3 did not return any content in the response.")
+        raise ValueError("comparator_llm did not return any content in the response.")
     return {
         "messages": [response],
         "comparator_report": response.content,

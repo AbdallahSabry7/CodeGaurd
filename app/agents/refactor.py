@@ -8,7 +8,7 @@ from prompts import (
     REFACTOR_SYSTEM_PROMPT2,
     REFACTOR_SYNTAX_PROMPT,
 )
-from llms import LLM2
+from llms import refactor_llm
 
 
 def _format_directives(directives: list[dict]) -> str:
@@ -54,9 +54,9 @@ def refactor_agent(state: AgentState) -> AgentState:
         HumanMessage(content=f"Report:\n{report}"),
     ]
 
-    response = LLM2.invoke(messages)
+    response = refactor_llm.invoke(messages)
     if not response.content:
-        raise ValueError("LLM2 did not return any content in the response.")
+        raise ValueError("refactor_llm did not return any content in the response.")
 
     raw = response.content
     fenced = re.search(r"```(?:python)?\s*\n(.*?)```", raw, re.DOTALL)
