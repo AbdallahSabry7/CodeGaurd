@@ -46,8 +46,8 @@ def build_graph():
         syntax_check_router2,
         {
             "fix": "Translate to Python",
-            "proceed": "analyzer"
-            'end': END,
+            "proceed": "analyzer",
+            'end': END
         }
     )
 
