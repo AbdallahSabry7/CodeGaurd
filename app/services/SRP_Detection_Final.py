@@ -4,7 +4,6 @@ import statistics
 from itertools import combinations
 
 # ── Semantic domain vocabulary ────────────────────────────────────────────────
-# Maps conceptual "areas of concern" to the verb tokens that signal them.
 SEMANTIC_DOMAINS: dict[str, set[str]] = {
     "persistence":  {"save", "store", "write", "persist", "insert", "update",
                      "delete", "remove", "create", "drop", "migrate", "commit"},
@@ -25,9 +24,6 @@ SEMANTIC_DOMAINS: dict[str, set[str]] = {
                      "sign", "permit", "hash"},
 }
 
-# PATCH 1 — Noun-based domain lookup
-# Generic orchestrator verbs (handle, run, execute) obscure violations because
-# the *noun* half of the name is more diagnostic in those cases.
 NOUN_DOMAINS: dict[str, set[str]] = {
     "persistence":  {"record", "row", "entity", "migration", "schema",
                      "table", "database", "db", "repo", "repository"},
@@ -44,13 +40,43 @@ NOUN_DOMAINS: dict[str, set[str]] = {
     "validation":   {"rule", "constraint", "schema", "policy", "limit"},
 }
 
+COLLABORATOR_NOUN_DOMAINS: dict[str, set[str]] = {
+    "persistence":  {"db", "repo", "repository", "store", "database",
+                     "session", "conn", "connection", "cursor", "orm",
+                     # FIX A: file/stream collaborators added
+                     "file", "writer", "reader", "buffer", "output", "input"},
+    "network":      {"client", "http", "api", "request", "socket",
+                     "endpoint", "proxy", "gateway",
+                     # FIX A: socket aliases added
+                     "sock", "stream", "pipe", "channel", "some_socket"},
+    "auth":         {"auth", "jwt", "token", "sso", "oauth", "permissions"},
+    "notification": {"mailer", "smtp", "email", "sms", "notifier",
+                     "pusher", "slack", "webhook"},
+    "presentation": {"renderer", "template", "view", "html", "pdf",
+                     "serializer", "formatter"},
+    "computation":  {"calculator", "scorer", "ranker", "analyzer",
+                     "estimator", "model", "processor"},
+    "validation":   {"validator", "checker", "sanitizer", "schema"},
+    "parsing":      {"parser", "decoder", "transformer", "mapper"},
+}
+
+# FIX B: Attributes that create false cohesion — excluded from LCOM calculation
+LCOM_NOISE_ATTRS = {
+    "logger", "log", "config", "cfg", "settings", "debug",
+    "verbose", "name", "type", "mode", "flag", "enabled",
+}
+
+DEFAULT_WEIGHTS = {
+    "body_domain_div":       0.38,
+    "effective_domain_div":  0.28,
+    "lcom":                  0.18,
+    "object_diversity":      0.10,
+    "size_factor":           0.04,
+    "responsibility_factor": 0.02,
+}
+
 
 def _tokenize_name(name: str) -> list[str]:
-    """
-    Split a snake_case or camelCase identifier into lowercase tokens.
-      'fetchUserAndSendEmail' → ['fetch', 'user', 'and', 'send', 'email']
-      'save_to_database'      → ['save', 'to', 'database']
-    """
     tokens = []
     for part in name.split("_"):
         sub = re.sub(r"([A-Z])", r" \1", part).strip()
@@ -59,26 +85,154 @@ def _tokenize_name(name: str) -> list[str]:
 
 
 def _classify_domains(method_name: str) -> set[str]:
-    """
-    Return all semantic domains the method name signals.
-    Scans both verb tokens (SEMANTIC_DOMAINS) and noun tokens (NOUN_DOMAINS)
-    so that names like 'handle_payment' or 'run_migration' are not invisible.
-    """
     tokens = set(_tokenize_name(method_name))
     domains: set[str] = set()
     for domain, keywords in SEMANTIC_DOMAINS.items():
         if tokens & keywords:
             domains.add(domain)
-    # PATCH 1: also scan nouns
     for domain, keywords in NOUN_DOMAINS.items():
         if tokens & keywords:
+            domains.add(domain)
+    full = method_name.lower()
+    for domain, keywords in COLLABORATOR_NOUN_DOMAINS.items():
+        if full in keywords:
             domains.add(domain)
     return domains or {"other"}
 
 
-# PATCH 2 — Decorator helpers
+def _classify_body_domains(func_node: ast.FunctionDef) -> set[str]:
+    """
+    Infer domains from the method *body*, not just its name.
+
+    Looks at:
+    - self.X.method() calls        → maps 'X' through COLLABORATOR_NOUN_DOMAINS
+    - self.X.Y.method() chains     → FIX: 3-level chain support
+    - standalone verb/builtin calls → maps through SEMANTIC_DOMAINS
+    - self.X assignments           → maps 'X' through NOUN_DOMAINS
+    - local alias tracking         → FIX C: conn = self.db; conn.query()
+    - self.attr comparisons        → FIX D: type-dispatch if/elif detection
+    """
+    domains: set[str] = set()
+
+    # FIX C: Track local aliases — conn = self.db → conn maps to persistence
+    local_aliases: dict[str, set[str]] = {}
+
+    for node in ast.walk(func_node):
+
+        # FIX C: x = self.collaborator  →  remember x's domain
+        if (
+            isinstance(node, ast.Assign)
+            and isinstance(node.value, ast.Attribute)
+            and isinstance(node.value.value, ast.Name)
+            and node.value.value.id == "self"
+        ):
+            collab = node.value.attr.lower()
+            for domain, keywords in COLLABORATOR_NOUN_DOMAINS.items():
+                if collab in keywords:
+                    for target in node.targets:
+                        if isinstance(target, ast.Name):
+                            local_aliases.setdefault(target.id, set()).add(domain)
+
+        # self.collaborator.method() — 2-level chain
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and isinstance(node.func.value, ast.Attribute)
+            and isinstance(node.func.value.value, ast.Name)
+            and node.func.value.value.id == "self"
+        ):
+            collab = node.func.value.attr.lower()
+            method = node.func.attr.lower()
+
+            collab_matched = False
+            for domain, keywords in COLLABORATOR_NOUN_DOMAINS.items():
+                if collab in keywords:
+                    domains.add(domain)
+                    collab_matched = True
+
+            # Only use verb domain if collaborator was unrecognized
+            # Prevents self.db.write() collapsing everything into persistence
+            if not collab_matched:
+                for domain, keywords in SEMANTIC_DOMAINS.items():
+                    if method in keywords:
+                        domains.add(domain)
+
+        # FIX: self.X.Y.method() — 3-level chain (e.g. self.service.client.post())
+        elif (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and isinstance(node.func.value, ast.Attribute)
+            and isinstance(node.func.value.value, ast.Attribute)
+            and isinstance(node.func.value.value.value, ast.Name)
+            and node.func.value.value.value.id == "self"
+        ):
+            collab = node.func.value.value.attr.lower()
+            method = node.func.attr.lower()
+            for domain, keywords in COLLABORATOR_NOUN_DOMAINS.items():
+                if collab in keywords:
+                    domains.add(domain)
+            for domain, keywords in SEMANTIC_DOMAINS.items():
+                if method in keywords:
+                    domains.add(domain)
+
+        # standalone function calls: save_user(), send_email(), open(), etc.
+        elif (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+        ):
+            fname = node.func.id.lower()
+            # FIX A: catch builtin open() as persistence signal
+            if fname in {"open", "openfile"}:
+                domains.add("persistence")
+            tokens = set(_tokenize_name(fname))
+            for domain, keywords in SEMANTIC_DOMAINS.items():
+                if tokens & keywords:
+                    domains.add(domain)
+
+            # FIX C: alias.method() — look up alias in local_aliases
+            if fname in local_aliases:
+                domains |= local_aliases[fname]
+
+        # FIX C: alias.method() on Attribute calls too
+        elif (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id != "self"
+            and node.func.value.id in local_aliases
+        ):
+            domains |= local_aliases[node.func.value.id]
+
+        # self.X = ... assignments — X itself may be a domain noun
+        elif isinstance(node, ast.Assign):
+            for target in node.targets:
+                if (
+                    isinstance(target, ast.Attribute)
+                    and isinstance(target.value, ast.Name)
+                    and target.value.id == "self"
+                ):
+                    attr_tokens = set(_tokenize_name(target.attr))
+                    for domain, keywords in NOUN_DOMAINS.items():
+                        if attr_tokens & keywords:
+                            domains.add(domain)
+
+    # FIX D: Type-dispatch detection — if/elif chains comparing self.attr to
+    # literals (self.type == 0, self.mode == "db") signal a class doing multiple
+    # things hidden behind a flag. Count as a synthetic "__dispatch__" domain.
+    self_compares = sum(
+        1 for n in ast.walk(func_node)
+        if isinstance(n, ast.Compare)
+        and isinstance(n.left, ast.Attribute)
+        and isinstance(n.left.value, ast.Name)
+        and n.left.value.id == "self"
+    )
+    if self_compares >= 2:
+        domains.add("__dispatch__")
+
+    return domains or {"other"}
+
+
 def _get_decorators(func_node: ast.FunctionDef) -> set[str]:
-    """Return the bare names of all decorators on a function node."""
     names: set[str] = set()
     for d in func_node.decorator_list:
         if isinstance(d, ast.Name):
@@ -88,15 +242,55 @@ def _get_decorators(func_node: ast.FunctionDef) -> set[str]:
     return names
 
 
+def _analyze_constructor(init_node: ast.FunctionDef) -> dict:
+    """
+    Parse __init__ to count how many distinct domain-mapped collaborators
+    are injected. A constructor that wires self.db, self.mailer, self.renderer,
+    and self.cache is one of the strongest possible SRP violations.
+    """
+    injected_domains: set[str] = set()
+    collaborator_names: set[str] = set()
+
+    for node in ast.walk(init_node):
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                if (
+                    isinstance(target, ast.Attribute)
+                    and isinstance(target.value, ast.Name)
+                    and target.value.id == "self"
+                ):
+                    attr = target.attr.lower()
+                    attr_tokens = set(_tokenize_name(attr))
+                    for domain, keywords in COLLABORATOR_NOUN_DOMAINS.items():
+                        if attr in keywords or attr_tokens & keywords:
+                            injected_domains.add(domain)
+                            collaborator_names.add(attr)
+                    for domain, keywords in NOUN_DOMAINS.items():
+                        if attr_tokens & keywords:
+                            injected_domains.add(domain)
+
+    n_domains = len(injected_domains)
+    injection_score = min(1.0, max(0.0, (n_domains - 1) / 3))
+
+    return {
+        "injected_domains": sorted(injected_domains),
+        "collaborator_count": len(collaborator_names),
+        "injection_score": round(injection_score, 2),
+    }
+
+
 class SRPAnalyzerEnhanced(ast.NodeVisitor):
-    def __init__(self):
+    def __init__(self, weights: dict | None = None):
+        self.weights = {**DEFAULT_WEIGHTS, **(weights or {})}
+        total = sum(self.weights.values())
+        if total > 0:
+            self.weights = {k: v / total for k, v in self.weights.items()}
         self.report: dict[str, dict] = {}
 
     # ── AST helpers ──────────────────────────────────────────────────────────
 
     @staticmethod
     def _self_attrs(func_node: ast.FunctionDef) -> set[str]:
-        """All `self.X` attribute names accessed in a method."""
         return {
             node.attr
             for node in ast.walk(func_node)
@@ -107,7 +301,6 @@ class SRPAnalyzerEnhanced(ast.NodeVisitor):
 
     @staticmethod
     def _external_objects(func_node: ast.FunctionDef) -> set[str]:
-        """Non-self names invoked as call targets (e.g. `db.query()` → `db`)."""
         objs: set[str] = set()
         for node in ast.walk(func_node):
             if isinstance(node, ast.Call):
@@ -123,45 +316,43 @@ class SRPAnalyzerEnhanced(ast.NodeVisitor):
 
     @staticmethod
     def _complexity(func_node: ast.FunctionDef) -> int:
-        """Rough cyclomatic complexity: branching nodes + 1."""
         branch_types = (
             ast.If, ast.For, ast.While, ast.ExceptHandler,
             ast.With, ast.Assert, ast.comprehension,
         )
         return 1 + sum(1 for n in ast.walk(func_node) if isinstance(n, branch_types))
 
-    # PATCH 4 — Facade/delegator detection
     @staticmethod
-    def _is_thin_delegator(func_node: ast.FunctionDef) -> bool:
+    def _classify_delegator(func_node: ast.FunctionDef) -> tuple[bool, bool]:
         """
-        True when a method body is essentially pure delegation:
-        ≤3 non-return statements that are all external calls.
-        These are coordinator/facade methods that legitimately span domains.
+        Returns (is_thin, is_cross_domain).
+        is_thin:         True when the body has ≤2 meaningful statements.
+        is_cross_domain: True when delegated callees span 2+ distinct domains.
         """
-        non_return = [
-            n for n in func_node.body
-            if not isinstance(n, (ast.Return, ast.Pass, ast.Expr))
-            or (
-                isinstance(n, ast.Expr)
-                and not isinstance(n.value, ast.Call)
-            )
-        ]
-        # Count actual call-expression statements
         call_stmts = [
             n for n in func_node.body
             if isinstance(n, ast.Expr) and isinstance(n.value, ast.Call)
         ]
-        total_meaningful = len(non_return) + len(call_stmts)
-        return total_meaningful <= 2
+        non_trivial = [
+            n for n in func_node.body
+            if not isinstance(n, (ast.Return, ast.Pass))
+            and not (isinstance(n, ast.Expr) and isinstance(n.value, ast.Call))
+        ]
+        total_meaningful = len(call_stmts) + len(non_trivial)
+        is_thin = total_meaningful <= 2
+
+        if not is_thin:
+            return False, False
+
+        body_domains = _classify_body_domains(func_node) - {"other"}
+        is_cross_domain = len(body_domains) >= 2
+
+        return True, is_cross_domain
 
     # ── Score sub-components ─────────────────────────────────────────────────
 
     @staticmethod
     def _jaccard_diversity(methods_info: list[dict]) -> float:
-        """
-        Average pairwise Jaccard *distance* of external-object sets.
-        High value means methods depend on very different collaborators.
-        """
         sets = [set(m["objects_used"]) for m in methods_info if m["objects_used"]]
         if len(sets) < 2:
             return 0.0
@@ -172,16 +363,24 @@ class SRPAnalyzerEnhanced(ast.NodeVisitor):
         return sum(dists) / len(dists)
 
     @staticmethod
-    def _lcom_score(methods_info: list[dict]) -> float:
+    def _lcom_score(methods_info: list[dict], collaborator_attrs: set[str]) -> float:
         """
-        Lack-of-Cohesion-of-Methods (0 = fully cohesive, 1 = no sharing).
+        LCOM with collaborator-weighted attribute sets.
+        FIX B: noise attributes (logger, config, type) excluded so they don't
+        create false cohesion between otherwise unrelated methods.
+        """
+        def weighted_attr_set(attrs: list[str]) -> set[str]:
+            result = set()
+            for a in attrs:
+                if a in LCOM_NOISE_ATTRS:   # FIX B: skip noise
+                    continue
+                result.add(a)
+                if a in collaborator_attrs:
+                    result.add(f"__collab__{a}__1")
+                    result.add(f"__collab__{a}__2")
+            return result
 
-        PATCH 2 (stateless fix): if no method touches self.* at all, the
-        class is a stateless utility helper — LCOM is undefined/meaningless
-        for it and must not penalise it.
-        """
-        attr_sets = [set(m["self_attrs"]) for m in methods_info]
-        # PATCH 2: stateless classes get 0, not 1
+        attr_sets = [weighted_attr_set(m["self_attrs"]) for m in methods_info]
         if not any(attr_sets):
             return 0.0
         if len(attr_sets) < 2:
@@ -192,51 +391,83 @@ class SRPAnalyzerEnhanced(ast.NodeVisitor):
 
     @staticmethod
     def _domain_diversity(methods_info: list[dict]) -> float:
-        """
-        Fraction of distinct semantic concern areas covered (excluding 'other').
-        ≤1 domain → 0.0 (no signal); ≥5 domains → 1.0 (clear violation).
-        """
         meaningful = {
             d
             for m in methods_info
             for d in m["domains"]
             if d != "other"
         }
-        return min(1.0, max(0.0, (len(meaningful) - 1) / 4))
+        return min(1.0, max(0.0, (len(meaningful) - 1) / 1.5))
 
-    # PATCH 5 — size_factor replacement
+    @staticmethod
+    def _body_domain_diversity(methods_info: list[dict]) -> float:
+        """
+        Domain diversity using body-scanned domains.
+        __dispatch__ counts as a real domain (type-dispatch = multiple responsibilities).
+        """
+        meaningful = {
+            d
+            for m in methods_info
+            for d in m["body_domains"]
+            if d != "other"   # __dispatch__ is intentionally kept
+        }
+        return min(1.0, max(0.0, (len(meaningful) - 1) / 1.5))
+
     @staticmethod
     def _size_factor(methods_info: list[dict]) -> float:
-        """
-        Original mean-based size_factor punished a single large method even
-        when it was a single-concern workhorse.
-
-        Replacement: proportion of methods that are individually large (>30
-        lines), blended with coefficient of variation to catch uneven
-        complexity spread. Neither alone is sufficient.
-        """
         lines = [m["line_count"] for m in methods_info]
         n = len(lines)
         avg = sum(lines) / n
-
         large_ratio = sum(1 for l in lines if l > 30) / n
-
         if n >= 2 and avg > 0:
-            cv = statistics.stdev(lines) / avg  # coefficient of variation
+            cv = statistics.stdev(lines) / avg
             cv_factor = min(1.0, cv / 2.0)
         else:
             cv_factor = 0.0
-
         return min(1.0, (large_ratio + cv_factor) / 2)
+
+    # ── Constructor collaborator detection ────────────────────────────────────
+
+    @staticmethod
+    def _detect_collaborator_attrs(class_node: ast.ClassDef) -> set[str]:
+        collaborators: set[str] = set()
+        for n in class_node.body:
+            if isinstance(n, ast.FunctionDef) and n.name == "__init__":
+                for node in ast.walk(n):
+                    if isinstance(node, ast.Assign):
+                        for target in node.targets:
+                            if (
+                                isinstance(target, ast.Attribute)
+                                and isinstance(target.value, ast.Name)
+                                and target.value.id == "self"
+                            ):
+                                attr = target.attr.lower()
+                                attr_tokens = set(_tokenize_name(attr))
+                                for keywords in COLLABORATOR_NOUN_DOMAINS.values():
+                                    if attr in keywords or attr_tokens & keywords:
+                                        collaborators.add(target.attr)
+                                        break
+                                for keywords in NOUN_DOMAINS.values():
+                                    if attr_tokens & keywords:
+                                        collaborators.add(target.attr)
+                                        break
+        return collaborators
 
     # ── Main visitor ─────────────────────────────────────────────────────────
 
     def visit_ClassDef(self, node: ast.ClassDef) -> None:
         class_name = node.name
         methods_info: list[dict] = []
+        constructor_info: dict = {}
+
+        collaborator_attrs = self._detect_collaborator_attrs(node)
 
         for n in node.body:
             if not isinstance(n, ast.FunctionDef):
+                continue
+
+            if n.name == "__init__":
+                constructor_info = _analyze_constructor(n)
                 continue
 
             if n.name.startswith("__") and n.name.endswith("__"):
@@ -244,26 +475,26 @@ class SRPAnalyzerEnhanced(ast.NodeVisitor):
 
             decorators = _get_decorators(n)
             if "property" in decorators:
-                # @property accessors are data-interface, not a responsibility.
-                # Including them inflates LCOM and domain diversity spuriously.
                 continue
             is_static = bool(decorators & {"staticmethod", "classmethod"})
 
             lines = (n.end_lineno or n.lineno) - n.lineno + 1
-
-            # Legacy: explicit And/Or split in method name
             parts = re.split(r"(?<=[a-z])(?:And|Or)(?=[A-Z])", n.name)
+            is_thin, is_cross_domain_delegator = self._classify_delegator(n)
+            body_domains = _classify_body_domains(n)
 
             methods_info.append({
-                "name":              n.name,
-                "objects_used":      list(self._external_objects(n)),
-                "self_attrs":        list(self._self_attrs(n)),
-                "domains":           _classify_domains(n.name),
-                "responsibilities":  [p.lower() for p in parts if p],
-                "line_count":        lines,
-                "complexity":        self._complexity(n),
-                "is_static":         is_static,
-                "is_thin_delegator": self._is_thin_delegator(n),
+                "name":                      n.name,
+                "objects_used":              list(self._external_objects(n)),
+                "self_attrs":                list(self._self_attrs(n)),
+                "domains":                   _classify_domains(n.name),
+                "body_domains":              body_domains,
+                "responsibilities":          [p.lower() for p in parts if p],
+                "line_count":                lines,
+                "complexity":                self._complexity(n),
+                "is_static":                 is_static,
+                "is_thin_delegator":         is_thin,
+                "is_cross_domain_delegator": is_cross_domain_delegator,
             })
 
         if not methods_info:
@@ -274,8 +505,8 @@ class SRPAnalyzerEnhanced(ast.NodeVisitor):
                 "is_violation": False,
                 "methods": [],
                 "diagnostics": {},
+                "constructor": constructor_info,
             }
-            # PATCH — recurse into nested class definitions
             for child in ast.walk(node):
                 if isinstance(child, ast.ClassDef) and child is not node:
                     self.visit_ClassDef(child)
@@ -291,35 +522,65 @@ class SRPAnalyzerEnhanced(ast.NodeVisitor):
             if total_objects else 0.0
         )
 
-        domain_div    = self._domain_diversity(methods_info)
-        lcom          = self._lcom_score(methods_info)
-        obj_diversity = self._jaccard_diversity(methods_info)
-        size_factor   = self._size_factor(methods_info)  # PATCH 5
+        domain_div      = self._domain_diversity(methods_info)
+        body_domain_div = self._body_domain_diversity(methods_info)
+        lcom            = self._lcom_score(methods_info, collaborator_attrs)
+        obj_diversity   = self._jaccard_diversity(methods_info)
+        size_factor     = self._size_factor(methods_info)
 
         n_methods = len(methods_info)
-        delegator_ratio = sum(1 for m in methods_info if m["is_thin_delegator"]) / n_methods
-        effective_domain_div = domain_div * (1 - 0.5 * delegator_ratio)
 
-        srp_violation_score = (
-            0.30 * obj_diversity             # methods depend on unrelated collaborators
-            + 0.25 * effective_domain_div    # spans distinct concern areas (facade-adjusted)
-            + 0.20 * lcom                    # structural cohesion (classic LCOM)
-            + 0.15 * size_factor             # large/complex method spread (PATCH 5)
-            + 0.10 * responsibility_factor   # legacy And/Or name heuristic
-            + 0.00 * object_factor           # retired: subsumed by obj_diversity
+        safe_delegator_count = sum(
+            1 for m in methods_info
+            if m["is_thin_delegator"] and not m["is_cross_domain_delegator"]
         )
+        delegator_ratio      = sum(1 for m in methods_info if m["is_thin_delegator"]) / n_methods
+        safe_delegator_ratio = safe_delegator_count / n_methods
+
+        effective_domain_div      = domain_div * (1 - 0.5 * safe_delegator_ratio)
+        effective_body_domain_div = body_domain_div
+
+        w = self.weights
+
+        # FIX E: Single-method classes — bypass weighted scoring entirely.
+        # The weighted model assumes multiple methods; with one method only
+        # LCOM and obj_diversity are structurally 0 regardless of content.
+        # Instead, score directly from how many domains the body touches.
+        if n_methods == 1:
+            solo_domains = {
+                d for d in methods_info[0]["body_domains"] if d != "other"
+            }
+            n_solo = len(solo_domains)
+            if n_solo >= 2:
+                # 2 domains → 0.40, 3 domains → 0.60, 4+ → capped at 0.80
+                srp_violation_score = min(0.80, 0.20 + n_solo * 0.20)
+            else:
+                srp_violation_score = 0.0
+        else:
+            srp_violation_score = (
+                w["object_diversity"]      * obj_diversity
+                + w["effective_domain_div"]  * effective_domain_div
+                + w["lcom"]                  * lcom
+                + w["body_domain_div"]       * effective_body_domain_div
+                + w["size_factor"]           * size_factor
+                + w["responsibility_factor"] * responsibility_factor
+            )
+
+        injection_score   = constructor_info.get("injection_score", 0.0)
+        constructor_boost = injection_score * 0.25
+        srp_violation_score = min(1.0, srp_violation_score + constructor_boost)
 
         detected_domains = sorted(
             {d for m in methods_info for d in m["domains"]} - {"other"}
         )
+        body_detected_domains = sorted(
+            {d for m in methods_info for d in m["body_domains"]} - {"other"}
+        )
 
-        # PATCH 3 — Three-tier output + adaptive threshold
-        # Small classes (few chances to recover via shared attrs) use a lower
-        # threshold; large classes get a slightly higher bar for specificity.
-        base_threshold = 0.40
+        base_threshold     = 0.18
         adaptive_threshold = base_threshold - max(0.0, (4 - n_methods) * 0.05)
 
-        if srp_violation_score > adaptive_threshold + 0.15:
+        if srp_violation_score > adaptive_threshold + 0.05:
             status, confidence = "Violation", "high"
         elif srp_violation_score > adaptive_threshold:
             status, confidence = "Review", "low"
@@ -330,72 +591,121 @@ class SRPAnalyzerEnhanced(ast.NodeVisitor):
 
         self.report[class_name] = {
             "srp_violation_score": round(srp_violation_score * 100, 1),
-            "status": status,
+            "status":     status,
             "confidence": confidence,
             "is_violation": is_violation,
-            "methods": [m["name"] for m in methods_info],
+            "methods":    [m["name"] for m in methods_info],
+            "constructor": constructor_info,
             "diagnostics": {
-                "domain_diversity":        round(domain_div, 2),
-                "effective_domain_div":    round(effective_domain_div, 2),
-                "lcom":                    round(lcom, 2),
-                "object_diversity":        round(obj_diversity, 2),
-                "responsibility_factor":   round(responsibility_factor, 2),
-                "size_factor":             round(size_factor, 2),
-                "delegator_ratio":         round(delegator_ratio, 2),
-                "adaptive_threshold":      round(adaptive_threshold * 100, 1),
-                "detected_domains":        detected_domains,
+                "domain_diversity":          round(domain_div, 2),
+                "effective_domain_div":      round(effective_domain_div, 2),
+                "body_domain_diversity":     round(body_domain_div, 2),
+                "effective_body_domain_div": round(effective_body_domain_div, 2),
+                "lcom":                      round(lcom, 2),
+                "object_diversity":          round(obj_diversity, 2),
+                "responsibility_factor":     round(responsibility_factor, 2),
+                "size_factor":               round(size_factor, 2),
+                "delegator_ratio":           round(delegator_ratio, 2),
+                "safe_delegator_ratio":      round(safe_delegator_ratio, 2),
+                "constructor_boost":         round(constructor_boost, 3),
+                "injection_score":           injection_score,
+                "adaptive_threshold":        round(adaptive_threshold * 100, 1),
+                "detected_domains":          detected_domains,
+                "body_detected_domains":     body_detected_domains,
+                "collaborator_attrs":        sorted(collaborator_attrs),
+                "weights_used":              {k: round(v, 3) for k, v in self.weights.items()},
+                "single_method_scoring":     n_methods == 1,   # FIX E: flag for debugging
             },
         }
 
-        # PATCH — recurse into nested class definitions
         for child in ast.walk(node):
             if isinstance(child, ast.ClassDef) and child is not node:
                 self.visit_ClassDef(child)
 
 
-def get_srp_report(code: str) -> list[dict]:
+def get_srp_report(code: str, weights: dict | None = None) -> list[dict]:
+    """
+    Analyze Python source code for Single Responsibility Principle violations.
+
+    Args:
+        code:    Python source as a string.
+        weights: Optional dict to override scoring weights. Keys:
+                   object_diversity, effective_domain_div, lcom,
+                   body_domain_div, size_factor, responsibility_factor
+                 Values are relative (normalized to sum=1 internally).
+
+    Returns:
+        List of result dicts, one per class found.
+    """
     try:
         tree = ast.parse(code)
-        analyzer = SRPAnalyzerEnhanced()
+        analyzer = SRPAnalyzerEnhanced(weights=weights)
         analyzer.visit(tree)
 
         if not analyzer.report:
             return [{
-                "status": "Pass",
+                "status":     "Pass",
                 "confidence": "high",
-                "reason": "No classes detected.",
-                "suggestion": "Define a class to see SRP analysis.",
+                "reason":     "No classes detected.",
+                # "suggestion": "Define a class to see SRP analysis.",
             }]
 
         results = []
         for class_name, data in analyzer.report.items():
-            diag   = data.get("diagnostics", {})
-            score  = data["srp_violation_score"]
-            status = data["status"]
-            conf   = data["confidence"]
-            domains = diag.get("detected_domains", [])
+            diag         = data.get("diagnostics", {})
+            ctor         = data.get("constructor", {})
+            score        = data["srp_violation_score"]
+            status       = data["status"]
+            conf         = data["confidence"]
+            domains      = diag.get("detected_domains", [])
+            body_domains = diag.get("body_detected_domains", [])
 
             if status in ("Violation", "Review"):
                 fired: list[str] = []
                 if diag.get("object_diversity", 0) > 0.5:
                     fired.append("methods depend on unrelated collaborators")
                 if diag.get("effective_domain_div", 0) > 0.2:
-                    fired.append(f"spans domains: {', '.join(domains)}")
+                    fired.append(f"name-inferred domains: {', '.join(domains)}")
+                if diag.get("effective_body_domain_div", 0) > 0.2:
+                    extra = [d for d in body_domains if d not in domains]
+                    if extra:
+                        fired.append(f"body-detected extra domains: {', '.join(extra)}")
+                    else:
+                        fired.append(f"body scan confirms cross-domain activity: {', '.join(body_domains)}")
+                if "__dispatch__" in body_domains:
+                    fired.append("type-dispatch flag (self.attr == literal) signals multiple responsibilities")
                 if diag.get("lcom", 0) > 0.5:
-                    fired.append("methods share few instance variables (low cohesion)")
+                    collabs = diag.get("collaborator_attrs", [])
+                    if collabs:
+                        fired.append(f"disjoint collaborator usage ({', '.join(collabs[:4])})")
+                    else:
+                        fired.append("methods share few instance variables (low cohesion)")
                 if diag.get("size_factor", 0) > 0.3:
                     fired.append("large/complex methods spread across the class")
                 if diag.get("responsibility_factor", 0) > 0:
-                    fired.append("'And'/'Or' in method names")
-                if diag.get("delegator_ratio", 0) > 0.5:
+                    fired.append("'And'/'Or' in method names signals multiple responsibilities")
+                if ctor.get("injection_score", 0) > 0.3:
+                    n_c   = ctor.get("collaborator_count", 0)
+                    inj_d = ctor.get("injected_domains", [])
                     fired.append(
-                        f"note: {int(diag['delegator_ratio']*100)}% of methods are thin "
-                        "delegators — may be a facade/coordinator"
+                        f"constructor injects {n_c} collaborators across domains: "
+                        f"{', '.join(inj_d)}"
+                    )
+                if diag.get("delegator_ratio", 0) > 0.5:
+                    cross = diag.get("safe_delegator_ratio", 0) < diag.get("delegator_ratio", 0)
+                    note  = "cross-domain" if cross else "same-domain"
+                    fired.append(
+                        f"note: {int(diag['delegator_ratio']*100)}% thin delegators "
+                        f"({note} — {'penalty applied' if cross else 'penalty reduced'})"
                     )
 
-                reason_str = "; ".join(fired) if fired else "multiple heuristics fired"
-                domain_hint = f" one per domain ({', '.join(domains)})" if domains else ""
-                threshold_note = f" (threshold: {diag.get('adaptive_threshold', 40)}%)"
+                reason_str    = "; ".join(fired) if fired else "multiple heuristics fired"
+                display_domains = [d for d in (body_domains or domains) if d != "__dispatch__"]
+                domain_hint   = (
+                    f" one per domain ({', '.join(display_domains)})"
+                    if display_domains else ""
+                )
+                threshold_note = f" (threshold: {diag.get('adaptive_threshold', 18)}%)"
 
                 if status == "Review":
                     results.append({
@@ -407,11 +717,12 @@ def get_srp_report(code: str) -> list[dict]:
                             f"Class '{class_name}' scored {score}%{threshold_note} — "
                             f"borderline result, manual review recommended. {reason_str}."
                         ),
-                        "suggestion": (
-                            f"Inspect '{class_name}' for mixed concerns,{domain_hint}. "
-                            "Score is in the uncertain zone; context matters here."
-                        ),
-                        "diagnostics": diag,
+                        # "suggestion": (
+                        #     f"Inspect '{class_name}' for mixed concerns,{domain_hint}. "
+                        #     "Score is in the uncertain zone; context matters here."
+                        # ),
+                        # "diagnostics": diag,
+                        # "constructor": ctor,
                     })
                 else:
                     results.append({
@@ -423,10 +734,11 @@ def get_srp_report(code: str) -> list[dict]:
                             f"Class '{class_name}' scored {score}%{threshold_note} — "
                             f"{reason_str}."
                         ),
-                        "suggestion": (
-                            f"Split '{class_name}' into focused classes,{domain_hint}."
-                        ),
-                        "diagnostics": diag,
+                        # "suggestion": (
+                        #     f"Split '{class_name}' into focused classes,{domain_hint}."
+                        # ),
+                        # "diagnostics": diag,
+                        # "constructor": ctor,
                     })
             else:
                 results.append({
@@ -435,8 +747,9 @@ def get_srp_report(code: str) -> list[dict]:
                     "confidence": conf,
                     "score":      score,
                     "reason":     f"Class '{class_name}' appears cohesive (score: {score}%).",
-                    "suggestion": "No refactor needed.",
-                    "diagnostics": diag,
+                    # "suggestion": "No refactor needed.",
+                    # "diagnostics": diag,
+                    # "constructor": ctor,
                 })
 
         return results

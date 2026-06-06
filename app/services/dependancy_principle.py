@@ -663,7 +663,7 @@ def get_dip_report(code_str: str) -> dict[str, object]:
             "status": "Error",
             "violations": [],
             "reason": f"Syntax error: {exc}",
-            "suggestion": "Fix the syntax error before running the DIP analyser.",
+            # "suggestion": "Fix the syntax error before running the DIP analyser.",
         }
 
     registry = _build_class_registry(tree)
@@ -675,7 +675,7 @@ def get_dip_report(code_str: str) -> dict[str, object]:
             "status": "Pass",
             "violations": [],
             "reason": "No concrete class dependencies detected.",
-            "suggestion": "N/A",
+            # "suggestion": "N/A",
         }
 
     return {
@@ -688,10 +688,10 @@ def get_dip_report(code_str: str) -> dict[str, object]:
             f"{len(analyzer.violations)} violation(s) found. "
             f"First: Line {analyzer.violations[0].line}: {analyzer.violations[0].message}"
         ),
-        "suggestion": (
-            "Inject abstractions (interfaces/abstract classes) instead of concrete classes. "
-            "Define a Protocol or ABC for each dependency and accept it in __init__."
-        ),
+        # "suggestion": (
+        #     "Inject abstractions (interfaces/abstract classes) instead of concrete classes. "
+        #     "Define a Protocol or ABC for each dependency and accept it in __init__."
+        # ),
     }
 
 

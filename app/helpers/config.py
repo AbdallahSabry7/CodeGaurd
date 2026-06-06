@@ -13,6 +13,8 @@ class Settings(BaseSettings):
 
     model1: str
     model2: str
+    model3: str
+    model4: str
     max_iterations: int
     openai_api_base : str
 

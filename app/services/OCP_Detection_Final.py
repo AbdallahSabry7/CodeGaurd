@@ -273,7 +273,7 @@ def get_ocp_report(code_str: str) -> dict:
             return {
                 "status": "Pass",
                 "reason": "No type-based dispatching detected.",
-                "suggestion": "N/A",
+                # "suggestion": "N/A",
                 "violations": [],
             }
 
@@ -290,21 +290,21 @@ def get_ocp_report(code_str: str) -> dict:
         return {
             "status": "Violation",
             "reason": f"{location} [{top['type']}]: {top['detail']}",
-            "suggestion": _suggestion_for(top["type"]),
+            # "suggestion": _suggestion_for(top["type"]),
             "violations": detector.violations,
         }
     except SyntaxError as e:
         return {
             "status": "Error",
             "reason": f"Syntax error: {e}",
-            "suggestion": "Fix syntax before analysing.",
+            # "suggestion": "Fix syntax before analysing.",
             "violations": [],
         }
     except Exception as e:
         return {
             "status": "Pass",
             "reason": "Analyser active.",
-            "suggestion": str(e),
+            # "suggestion": str(e),
             "violations": [],
         }
 

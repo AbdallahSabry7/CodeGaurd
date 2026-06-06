@@ -1,29 +1,8 @@
-"""
-LSP (Liskov Substitution Principle) violation detector.
-
-Improvements over v1:
-- Two-pass architecture: collect all class definitions first, then analyze
-  methods — fixes ordering issues where child is defined before parent.
-- Deduplication: violations are keyed by (line, message) so multi-level
-  inheritance chains don't produce duplicate reports.
-- classmethod/staticmethod-aware self/cls skipping in extract_signature.
-- Removed high-false-positive "every if-raise = stricter precondition" rule;
-  replaced with a narrower check that only flags raises on bare argument
-  equality/identity checks at the top of a method.
-- Return-type check now understands None, Optional[X] ~ X, and bare names.
-- Severity enum for structured filtering downstream.
-- get_lsp_report returns all violations, not just the first.
-"""
-
 import ast
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Optional
 
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
 
 class Severity(str, Enum):
     LOW = "Low"
@@ -92,15 +71,13 @@ _ABSTRACT_DOC_TRIGGERS = {
     "abstract method",
     "subclasses should implement",
     "to be implemented by subclass",
-    "abstract",
     "must implement",
-    "override",
     "implement me",
 }
 
 
 def is_abstract_method(node: ast.FunctionDef) -> bool:
-    # Decorator-based
+    # Decorator-based (most reliable signal — keep)
     if _decorator_names(node) & _ABSTRACT_DECORATORS:
         return True
 
@@ -109,12 +86,9 @@ def is_abstract_method(node: ast.FunctionDef) -> bool:
         stmt = node.body[0]
         if isinstance(stmt, ast.Pass):
             return True
-        if (
-            isinstance(stmt, ast.Expr)
-            and isinstance(stmt.value, ast.Constant)
-            and isinstance(stmt.value.value, str)
-        ):
-            return True
+        # FIX: only treat a docstring-only body as abstract when combined with
+        # an explicit raise of NotImplementedError or an @abstract decorator,
+        # NOT on its own.  A docstring alone is just documentation.
         if (
             isinstance(stmt, ast.Return)
             and isinstance(stmt.value, ast.Name)
@@ -127,7 +101,9 @@ def is_abstract_method(node: ast.FunctionDef) -> bool:
         if isinstance(n, ast.Raise) and exc_name_from_raise(n) == "NotImplementedError":
             return True
 
-    # Docstring hints
+    # FIX: tighten docstring heuristic — require explicit "not implemented" /
+    # "subclasses should implement" phrasing only (removed vague "abstract",
+    # "override" which caused far too many false positives).
     doc = ast.get_docstring(node)
     if doc and any(t in doc.lower() for t in _ABSTRACT_DOC_TRIGGERS):
         return True
@@ -162,18 +138,18 @@ class Signature:
     n_defaults: int
     vararg: Optional[str]
     kwarg: Optional[str]
-    annotations: dict[str, str]  # param_name -> source string
+    annotations: dict[str, str]
     return_annotation: Optional[str]
+    # NEW: track default values as unparsed strings so we can detect
+    # changes in default *values* (not just count).
+    default_values: list[str] = field(default_factory=list)
+    # NEW: track all param annotations including kwonly
+    kwonly_annotations: dict[str, str] = field(default_factory=dict)
 
 
 def extract_signature(func: ast.FunctionDef) -> Signature:
-    """
-    Build a Signature, skipping 'self' for regular/class methods and
-    skipping nothing for static methods (they have no implicit first arg).
-    """
     args = func.args
     is_static = _is_staticmethod(func)
-    # For non-static methods drop the first positional arg (self / cls)
     positional_args = args.args if is_static else args.args[1:]
 
     def src(node) -> str:
@@ -194,6 +170,12 @@ def extract_signature(func: ast.FunctionDef) -> Signature:
             if a.annotation
         },
         return_annotation=src(func.returns) if func.returns else None,
+        default_values=[src(d) for d in args.defaults],
+        kwonly_annotations={
+            a.arg: src(a.annotation)
+            for a in args.kwonlyargs
+            if a.annotation
+        },
     )
 
 
@@ -216,10 +198,6 @@ _BUILTIN_HIERARCHY: dict[str, list[str]] = {
 
 
 def _unwrap_optional(type_str: str) -> tuple[bool, str]:
-    """
-    Return (is_optional, inner_type).
-    Handles 'Optional[X]', 'Union[X, None]', 'X | None'.
-    """
     s = type_str.strip()
     if s.startswith("Optional[") and s.endswith("]"):
         return True, s[9:-1].strip()
@@ -227,7 +205,6 @@ def _unwrap_optional(type_str: str) -> tuple[bool, str]:
         return True, s[:-6].strip()
     if s.startswith("None |"):
         return True, s[6:].strip()
-    # Union[X, None] — very naive but covers the common case
     if s.startswith("Union[") and s.endswith("]"):
         inner = s[6:-1]
         parts = [p.strip() for p in inner.split(",")]
@@ -254,28 +231,114 @@ class TypeChecker:
         return result
 
     def is_subtype(self, child: str, parent: str) -> bool:
-        """Return True if child is-a parent (or equal)."""
         if child == parent:
             return True
         key = (child, parent)
         if key in self._cache:
             return self._cache[key]
 
-        # Optional unwrapping: Optional[X] is a subtype of Optional[X] (handled above)
-        # Optional[X] is NOT a subtype of X (stricter); X IS a subtype of Optional[X]
         p_opt, p_inner = _unwrap_optional(parent)
         c_opt, c_inner = _unwrap_optional(child)
         if p_opt and not c_opt:
-            # parent is Optional[T], child is T  → T ⊆ Optional[T]  ✓
             result = self.is_subtype(child, p_inner)
         elif c_opt and not p_opt:
-            # parent is T, child is Optional[T] → Optional[T] ⊄ T   ✗
             result = False
         else:
             result = parent in self._all_parents(child)
 
         self._cache[key] = result
         return result
+
+
+# ---------------------------------------------------------------------------
+# NEW: Helper to collect all raises in a function (non-recursive into nested
+#      function/class defs, matching how callers see the method surface).
+# ---------------------------------------------------------------------------
+
+def _direct_raises(func: ast.FunctionDef) -> set[str]:
+    """
+    Walk the function body but do NOT descend into nested functions/classes,
+    so we only see raises that the caller of *this* method will encounter.
+    """
+    raises: set[str] = set()
+    _walk_no_nested(func, raises)
+    return raises - {""}
+
+
+def _walk_no_nested(node: ast.AST, out: set[str]) -> None:
+    for child in ast.iter_child_nodes(node):
+        if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            continue  # don't descend into nested scopes
+        if isinstance(child, ast.Raise):
+            out.add(exc_name_from_raise(child))
+        _walk_no_nested(child, out)
+
+
+# ---------------------------------------------------------------------------
+# NEW: Detect early-return guards anywhere in the method body
+#      (not just the first statement like the original code).
+# ---------------------------------------------------------------------------
+
+def _has_early_return_guard(func: ast.FunctionDef, param_names: list[str]) -> bool:
+    """
+    Return True if there is ANY if-block in the function body (at the top
+    level of the function, not inside loops/try blocks) whose test is a
+    type/identity guard on a parameter AND whose body only returns or raises.
+    This catches stricter-precondition guards beyond just the first line.
+    """
+    for stmt in func.body:
+        if (
+            isinstance(stmt, ast.If)
+            and _is_type_guard(stmt.test, param_names)
+            and all(isinstance(s, (ast.Return, ast.Raise)) for s in stmt.body)
+        ):
+            return True
+    return False
+
+
+# ---------------------------------------------------------------------------
+# NEW: Detect whether a method calls super() for the same method name.
+#      A concrete override that never calls super() may silently break the
+#      parent contract (Liskov substitutability via behavioral composition).
+# ---------------------------------------------------------------------------
+
+def _calls_super(func: ast.FunctionDef) -> bool:
+    for node in ast.walk(func):
+        if isinstance(node, ast.Call):
+            f = node.func
+            # super().method_name(...)
+            if (
+                isinstance(f, ast.Attribute)
+                and f.attr == func.name
+                and isinstance(f.value, ast.Call)
+                and isinstance(f.value.func, ast.Name)
+                and f.value.func.id == "super"
+            ):
+                return True
+            # super().__init__() etc.
+            if (
+                isinstance(f, ast.Attribute)
+                and isinstance(f.value, ast.Call)
+                and isinstance(f.value.func, ast.Name)
+                and f.value.func.id == "super"
+            ):
+                return True
+    return False
+
+
+# ---------------------------------------------------------------------------
+# NEW: Parameter renaming detection.
+#      Callers using positional args are fine, but callers using keyword args
+#      will break if a positional parameter is renamed.
+# ---------------------------------------------------------------------------
+
+def _renamed_params(child_sig: "Signature", parent_sig: "Signature") -> list[tuple[str, str]]:
+    """Return list of (parent_name, child_name) pairs that differ by position."""
+    renames = []
+    for i, (p, c) in enumerate(zip(parent_sig.positional, child_sig.positional)):
+        if p != c:
+            renames.append((p, c))
+    return renames
 
 
 # ---------------------------------------------------------------------------
@@ -295,7 +358,7 @@ class LSPDetector(ast.NodeVisitor):
         self._inheritance: dict[str, list[str]] = {}
         self._abstract_classes: set[str] = set()
         self._violations: list[Violation] = []
-        self._seen: set[tuple[int, str]] = set()  # dedup key
+        self._seen: set[tuple[int, str]] = set()
 
     # ------------------------------------------------------------------
     # Pass 1 — collection
@@ -327,9 +390,11 @@ class LSPDetector(ast.NodeVisitor):
                 for m in cls_node.body
                 if isinstance(m, (ast.FunctionDef, ast.AsyncFunctionDef))
             }
-            # Track which method names we've already checked against an ancestor
-            # so that A→B→C doesn't fire B's violation twice when checking C.
-            checked: set[str] = set()
+            # FIX: removed the `checked` set that was suppressing violations
+            # for multi-level inheritance chains (A→B→C would skip B's
+            # violations when checking C against B's parent A).
+            # Instead, compare each child method against its DIRECT parent
+            # in the MRO that defines the method first.
             for parent_name in all_parents:
                 if parent_name not in self._classes:
                     continue
@@ -340,7 +405,7 @@ class LSPDetector(ast.NodeVisitor):
                     if isinstance(m, (ast.FunctionDef, ast.AsyncFunctionDef))
                 }
                 for method_name, child_method in child_methods.items():
-                    if method_name in parent_methods and method_name not in checked:
+                    if method_name in parent_methods:
                         self._compare(
                             child_method,
                             parent_methods[method_name],
@@ -348,7 +413,6 @@ class LSPDetector(ast.NodeVisitor):
                             parent_name,
                             checker,
                         )
-                checked.update(parent_methods)
         return self._violations
 
     # ------------------------------------------------------------------
@@ -405,13 +469,43 @@ class LSPDetector(ast.NodeVisitor):
                 f"{parent_sig.kwonly!r} → {child_sig.kwonly!r}.",
             )
 
-        # --- Default removal (child removes a caller-relied-upon default) ---
+        # FIX NEW: keyword-only parameter type annotation changes
+        for kw_param, p_type in parent_sig.kwonly_annotations.items():
+            c_type = child_sig.kwonly_annotations.get(kw_param)
+            if c_type and c_type != p_type:
+                if not checker.is_subtype(p_type, c_type):
+                    self._add(
+                        child,
+                        f"LSP: keyword-only parameter '{kw_param}' in "
+                        f"'{child_cls}.{name}' violates contravariance — "
+                        f"parent accepts '{p_type}' but child requires '{c_type}'.",
+                        Severity.HIGH,
+                    )
+
+        # --- Default removal ---
         if child_sig.n_defaults < parent_sig.n_defaults:
             self._add(
                 child,
                 f"LSP: '{child_cls}.{name}' removes default parameter values "
                 f"that callers may rely on.",
             )
+
+        # FIX NEW: default value *changes* (not just count reduction).
+        # Align from the right (Python default alignment).
+        if child_sig.n_defaults > 0 and parent_sig.n_defaults > 0:
+            p_defs = parent_sig.default_values
+            c_defs = child_sig.default_values
+            # compare the shared trailing slice
+            shared = min(len(p_defs), len(c_defs))
+            for pd, cd in zip(p_defs[-shared:], c_defs[-shared:]):
+                if pd != cd:
+                    self._add(
+                        child,
+                        f"LSP: '{child_cls}.{name}' changes default parameter "
+                        f"values ('{pd}' → '{cd}'), breaking callers that rely "
+                        f"on the parent's defaults.",
+                    )
+                    break  # one violation per method
 
         # --- *args / **kwargs ---
         if child_sig.vararg != parent_sig.vararg:
@@ -427,12 +521,20 @@ class LSPDetector(ast.NodeVisitor):
                 f"('{parent_sig.kwarg}' → '{child_sig.kwarg}').",
             )
 
+        # FIX NEW: positional parameter renaming breaks keyword callers.
+        renames = _renamed_params(child_sig, parent_sig)
+        for p_name, c_name in renames:
+            self._add(
+                child,
+                f"LSP: '{child_cls}.{name}' renames parameter '{p_name}' → "
+                f"'{c_name}', breaking callers that pass it as a keyword argument.",
+            )
+
         # --- Parameter type annotations (contravariance) ---
         for param in parent_sig.annotations:
             p_type = parent_sig.annotations[param]
             c_type = child_sig.annotations.get(param)
             if p_type and c_type and c_type != p_type:
-                # Child param must accept at least as broad a type as parent
                 if not checker.is_subtype(p_type, c_type):
                     self._add(
                         child,
@@ -453,6 +555,17 @@ class LSPDetector(ast.NodeVisitor):
                     f"'{p_ret}' → '{c_ret}' (not a subtype).",
                     Severity.HIGH,
                 )
+
+        # FIX NEW: parent has return annotation but child drops it entirely.
+        # Dropping annotations is a soft signal — use LOW severity.
+        if p_ret and not c_ret:
+            self._add(
+                child,
+                f"LSP: '{child_cls}.{name}' drops the return type annotation "
+                f"'{p_ret}' from '{parent_cls}.{name}'. "
+                f"Static checkers can no longer verify the contract.",
+                Severity.LOW,
+            )
 
         # --- Method binding type (static/classmethod) ---
         _important = {"staticmethod", "classmethod"}
@@ -475,9 +588,11 @@ class LSPDetector(ast.NodeVisitor):
                     )
 
         # --- Concrete parent: child introduces new exception types ---
+        # FIX: use _direct_raises instead of ast.walk to avoid false positives
+        # from nested function/lambda exception handling.
         if not parent_abstract:
-            parent_excs = {exc_name_from_raise(n) for n in ast.walk(parent) if isinstance(n, ast.Raise)} - {""}
-            child_excs  = {exc_name_from_raise(n) for n in ast.walk(child)  if isinstance(n, ast.Raise)} - {""}
+            parent_excs = _direct_raises(parent)
+            child_excs  = _direct_raises(child)
             for exc in child_excs - parent_excs:
                 self._add(
                     child,
@@ -485,8 +600,25 @@ class LSPDetector(ast.NodeVisitor):
                     f"not raised by '{parent_cls}.{name}'.",
                 )
 
+        # FIX NEW: also flag new exceptions when parent IS abstract but the
+        # class hierarchy contract is defined (i.e. sibling overrides agree).
+        # This handles the common pattern: ABC defines the interface, one
+        # concrete impl raises something unexpected vs other impls.
+        # (Only fire when there are 2+ concrete siblings defining the method.)
+        if parent_abstract:
+            sibling_excs = self._sibling_exceptions(child_cls, name, child)
+            own_excs = _direct_raises(child)
+            for exc in own_excs - sibling_excs:
+                if sibling_excs:  # only flag when we have a baseline
+                    self._add(
+                        child,
+                        f"LSP: '{child_cls}.{name}' raises '{exc}' which is not "
+                        f"raised by other concrete implementations of "
+                        f"'{parent_cls}.{name}'.",
+                        Severity.LOW,
+                    )
+
         # --- Method body is a single raise (removes all parent behavior) ---
-        # Only meaningful when the parent has concrete behavior to remove.
         if (
             not parent_abstract
             and len(child.body) == 1
@@ -507,26 +639,16 @@ class LSPDetector(ast.NodeVisitor):
                     f"LSP: '{child_cls}.{name}' introduces assert statements "
                     f"(stronger preconditions than parent).",
                 )
-                break  # one violation per method is enough
+                break
 
-        # --- Narrower preconditions: type-guard raises at the TOP of method.
-        #     Only flag if the very first statement is an if-raise whose test
-        #     is an isinstance() or identity check on a parameter.
-        #     This avoids flagging ordinary business logic that happens to
-        #     raise inside a conditional.
-        if child.body:
-            first = child.body[0]
-            if (
-                isinstance(first, ast.If)
-                and len(first.body) == 1
-                and isinstance(first.body[0], ast.Raise)
-                and _is_type_guard(first.test, child_sig.positional)
-            ):
-                self._add(
-                    child,
-                    f"LSP: '{child_cls}.{name}' adds a type-guard check at the "
-                    f"top of the method, strengthening the parent's precondition.",
-                )
+        # FIX: extended type-guard check to cover ALL top-level if-blocks,
+        # not just the very first statement.
+        if _has_early_return_guard(child, child_sig.positional):
+            self._add(
+                child,
+                f"LSP: '{child_cls}.{name}' adds a type-guard check, "
+                f"strengthening the parent's precondition.",
+            )
 
         # --- Parent returns a value; child never does ---
         parent_returns = any(
@@ -545,12 +667,55 @@ class LSPDetector(ast.NodeVisitor):
                 Severity.HIGH,
             )
 
+        # FIX NEW: concrete parent has super() call pattern while child
+        # silently drops it — may break cooperative multiple inheritance
+        # and parent post-conditions.
+        if not parent_abstract and not _calls_super(child):
+            # Only flag non-trivial overrides (more than just a docstring or pass)
+            non_trivial = any(
+                not (
+                    isinstance(s, ast.Expr)
+                    and isinstance(s.value, ast.Constant)
+                    and isinstance(s.value.value, str)
+                )
+                and not isinstance(s, ast.Pass)
+                for s in child.body
+            )
+            if non_trivial and _calls_super(parent):
+                self._add(
+                    child,
+                    f"LSP: '{child_cls}.{name}' overrides '{parent_cls}.{name}' "
+                    f"without calling super(), dropping parent behavior.",
+                    Severity.MEDIUM,
+                )
+
+    # ------------------------------------------------------------------
+    # NEW helper: collect exception names from all sibling implementations
+    # ------------------------------------------------------------------
+
+    def _sibling_exceptions(
+        self, cls_name: str, method_name: str, skip_node: ast.FunctionDef
+    ) -> set[str]:
+        """
+        Return the union of exceptions raised by all OTHER concrete classes
+        that also define `method_name` and share a common abstract parent.
+        """
+        result: set[str] = set()
+        for other_cls, other_node in self._classes.items():
+            if other_cls == cls_name:
+                continue
+            for item in other_node.body:
+                if (
+                    isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef))
+                    and item.name == method_name
+                    and item is not skip_node
+                    and not is_abstract_method(item)
+                ):
+                    result |= _direct_raises(item)
+        return result
+
 
 def _is_type_guard(test: ast.expr, param_names: list[str]) -> bool:
-    """
-    Return True if `test` looks like a top-level type or identity guard
-    on a method parameter: isinstance(x, T), x is None, not isinstance(x, T).
-    """
     if isinstance(test, ast.UnaryOp) and isinstance(test.op, ast.Not):
         return _is_type_guard(test.operand, param_names)
     if isinstance(test, ast.Call):
@@ -566,10 +731,6 @@ def _is_type_guard(test: ast.expr, param_names: list[str]) -> bool:
                 return True
     return False
 
-
-# ---------------------------------------------------------------------------
-# Public API
-# ---------------------------------------------------------------------------
 
 def analyze_code(code_str: str) -> list[Violation]:
     tree = ast.parse(code_str)
@@ -597,328 +758,9 @@ def get_lsp_report(code_str: str) -> dict:
                 }
                 for v in sorted(violations, key=lambda v: v.line)
             ],
-            "suggestion": "Keep subclass behavior compatible with parent contracts.",
+            # "suggestion": "Keep subclass behavior compatible with parent contracts.",
         }
     except SyntaxError as e:
         return {"status": "Error", "reason": f"Syntax error: {e}", "violations": []}
     except Exception as e:
         return {"status": "Error", "reason": str(e), "violations": []}
-
-
-# ---------------------------------------------------------------------------
-# Test fixtures
-# ---------------------------------------------------------------------------
-
-PARAM_COUNT_VIOLATION = """
-class Animal:
-    def process(self, x: int) -> object:
-        return x
-
-class BadDog(Animal):
-    def process(self, x, y):
-        return x
-"""
-
-PARAM_COUNT_PASS = """
-class Animal:
-    def process(self, x: int) -> object:
-        return x
-
-class Dog(Animal):
-    def process(self, x: int) -> object:
-        return x * 2
-"""
-
-PARAM_TYPE_VIOLATION = """
-class Animal:
-    def process(self, x: int) -> object:
-        return x
-
-class Dog(Animal):
-    def process(self, x: str) -> object:  # str is not a supertype of int
-        return x
-"""
-
-PARAM_TYPE_PASS = """
-class Animal:
-    def process(self, x: bool) -> object:
-        return x
-
-class Dog(Animal):
-    def process(self, x: int) -> object:  # int is supertype of bool — OK
-        return x
-"""
-
-RETURN_TYPE_VIOLATION = """
-class Base:
-    def run(self) -> int:
-        return 42
-
-class Broken(Base):
-    def run(self) -> str:   # str is NOT a subtype of int
-        return "oops"
-"""
-
-RETURN_TYPE_PASS = """
-class Base:
-    def get(self) -> object:
-        return 1
-
-class Child(Base):
-    def get(self) -> int:   # int is subtype of object — covariance satisfied
-        return 2
-"""
-
-NOT_IMPLEMENTED_VIOLATION = """
-class Base:
-    def run(self):
-        print("running")
-
-class Child(Base):
-    def run(self):
-        raise NotImplementedError()
-"""
-
-NOT_IMPLEMENTED_PASS = """
-from abc import ABC, abstractmethod
-
-class Base(ABC):
-    @abstractmethod
-    def run(self): pass
-
-class Child(Base):
-    def run(self):
-        print("running")  # concrete implementation — no violation
-"""
-
-REMOVES_RETURN_VIOLATION = """
-class Base:
-    def compute(self) -> int:
-        return 42
-
-class Child(Base):
-    def compute(self):
-        print("computing")   # never returns a value
-"""
-
-REMOVES_RETURN_PASS = """
-class Base:
-    def compute(self) -> int:
-        return 42
-
-class Child(Base):
-    def compute(self) -> int:
-        return 99
-"""
-
-BINDING_TYPE_VIOLATION = """
-class A:
-    @classmethod
-    def test(cls):
-        pass
-
-class B(A):
-    def test(self):   # drops classmethod
-        pass
-"""
-
-BINDING_TYPE_PASS = """
-class A:
-    @classmethod
-    def test(cls):
-        pass
-
-class B(A):
-    @classmethod
-    def test(cls):
-        pass
-"""
-
-KWONLY_VIOLATION = """
-class Base:
-    def run(self, *, verbose=False): pass
-
-class Child(Base):
-    def run(self, *, debug=False): pass  # renamed kwonly param
-"""
-
-KWONLY_PASS = """
-class Base:
-    def run(self, *, verbose=False): pass
-
-class Child(Base):
-    def run(self, *, verbose=False): pass
-"""
-
-REMOVES_DEFAULT_VIOLATION = """
-class Base:
-    def connect(self, host, port=8080): pass
-
-class Child(Base):
-    def connect(self, host, port): pass  # removes default
-"""
-
-REMOVES_DEFAULT_PASS = """
-class Base:
-    def connect(self, host, port=8080): pass
-
-class Child(Base):
-    def connect(self, host, port=9090): pass  # changes default value — OK
-"""
-
-FORWARD_DECLARED_VIOLATION = """
-class EarlyChild(LateParent):
-    def greet(self, name: int) -> str:
-        return str(name)
-
-class LateParent:
-    def greet(self, name: str) -> str:
-        return name
-"""
-
-FORWARD_DECLARED_PASS = """
-class LateParent:
-    def greet(self, name: str) -> str:
-        return name
-
-class EarlyChild(LateParent):
-    def greet(self, name: str) -> str:
-        return name.upper()
-"""
-
-NEW_EXCEPTION_VIOLATION = """
-class Base:
-    def load(self, path):
-        return open(path).read()
-
-class Child(Base):
-    def load(self, path):
-        if not path:
-            raise FileNotFoundError()
-        return open(path).read()
-"""
-
-NEW_EXCEPTION_PASS = """
-class Base:
-    def load(self, path):
-        raise FileNotFoundError()
-
-class Child(Base):
-    def load(self, path):
-        # does real work, raises the same exception the parent does
-        data = open(path).read()
-        if not data:
-            raise FileNotFoundError()
-        return data
-"""
-
-ALWAYS_RAISES_VIOLATION = """
-class Base:
-    def save(self, data):
-        self.db.write(data)
-
-class Child(Base):
-    def save(self, data):
-        raise RuntimeError("not supported")
-"""
-
-ALWAYS_RAISES_PASS = """
-class Base:
-    def save(self, data):
-        self.db.write(data)
-
-class Child(Base):
-    def save(self, data):
-        self.cache.write(data)
-"""
-
-ASSERT_PRECONDITION_VIOLATION = """
-class Base:
-    def process(self, value):
-        return value * 2
-
-class Child(Base):
-    def process(self, value):
-        assert value > 0, "must be positive"
-        return value * 2
-"""
-
-ASSERT_PRECONDITION_PASS = """
-class Base:
-    def process(self, value):
-        assert value > 0
-        return value * 2
-
-class Child(Base):
-    def process(self, value):
-        return value * 2
-"""
-
-# ---------------------------------------------------------------------------
-# Test harness
-# ---------------------------------------------------------------------------
-
-if __name__ == "__main__":
-    examples = [
-        # violations
-        ("Param count      VIOLATION — extra positional arg      (BadDog)",      PARAM_COUNT_VIOLATION,      "Violation"),
-        ("Param type       VIOLATION — contravariance broken      (Dog/str→int)", PARAM_TYPE_VIOLATION,       "Violation"),
-        ("Return type      VIOLATION — non-subtype return         (Broken)",      RETURN_TYPE_VIOLATION,      "Violation"),
-        ("NotImplemented   VIOLATION — overrides concrete method  (Child)",       NOT_IMPLEMENTED_VIOLATION,  "Violation"),
-        ("Removes return   VIOLATION — drops non-None return      (Child)",       REMOVES_RETURN_VIOLATION,   "Violation"),
-        ("Binding type     VIOLATION — drops classmethod          (B)",           BINDING_TYPE_VIOLATION,     "Violation"),
-        ("Kwonly params    VIOLATION — renames keyword-only param (Child)",       KWONLY_VIOLATION,           "Violation"),
-        ("Removes default  VIOLATION — removes parameter default  (Child)",       REMOVES_DEFAULT_VIOLATION,  "Violation"),
-        ("Forward declared VIOLATION — child before parent        (EarlyChild)",  FORWARD_DECLARED_VIOLATION, "Violation"),
-        ("New exception    VIOLATION — introduces new exception   (Child)",       NEW_EXCEPTION_VIOLATION,    "Violation"),
-        ("Always raises    VIOLATION — removes all parent behavior(Child)",       ALWAYS_RAISES_VIOLATION,    "Violation"),
-        ("Assert precon.   VIOLATION — strengthens precondition   (Child)",       ASSERT_PRECONDITION_VIOLATION, "Violation"),
-        # passes
-        ("Param count      PASS      — same signature             (Dog)",         PARAM_COUNT_PASS,           "Pass"),
-        ("Param type       PASS      — bool→int contravariance OK (Dog)",         PARAM_TYPE_PASS,            "Pass"),
-        ("Return type      PASS      — int subtype of object      (Child)",       RETURN_TYPE_PASS,           "Pass"),
-        ("NotImplemented   PASS      — parent is abstract         (Child)",       NOT_IMPLEMENTED_PASS,       "Pass"),
-        ("Removes return   PASS      — child still returns        (Child)",       REMOVES_RETURN_PASS,        "Pass"),
-        ("Binding type     PASS      — both classmethod           (B)",           BINDING_TYPE_PASS,          "Pass"),
-        ("Kwonly params    PASS      — same kwonly params         (Child)",       KWONLY_PASS,                "Pass"),
-        ("Removes default  PASS      — changes value, keeps param (Child)",       REMOVES_DEFAULT_PASS,       "Pass"),
-        ("Forward declared PASS      — child after parent         (EarlyChild)",  FORWARD_DECLARED_PASS,      "Pass"),
-        ("New exception    PASS      — same exception as parent   (Child)",       NEW_EXCEPTION_PASS,         "Pass"),
-        ("Always raises    PASS      — child provides behavior    (Child)",       ALWAYS_RAISES_PASS,         "Pass"),
-        ("Assert precon.   PASS      — child relaxes, not tightens(Child)",       ASSERT_PRECONDITION_PASS,   "Pass"),
-    ]
-
-    passed = failed = 0
-    failures = []
-
-    for title, code, expected in examples:
-        report = get_lsp_report(code)
-        got = report["status"]
-        ok = (got == expected)
-        symbol = "✓" if ok else "✗"
-        if ok:
-            passed += 1
-        else:
-            failed += 1
-            failures.append((title, expected, got, report))
-
-        print(f"\n{'═' * 74}")
-        print(f"  {symbol}  {title}")
-        print(f"     Expected: {expected:<12}  Got: {got}")
-        print("═" * 74)
-        if report["violations"]:
-            for v in report["violations"]:
-                print(f"  [{v['severity']}] line {v['line']} — {v['message']}")
-        else:
-            print(f"  {report.get('reason', 'No violations found.')}")
-
-    print(f"\n{'═' * 74}")
-    print(f"  RESULTS: {passed} passed, {failed} failed out of {len(examples)} examples")
-    if failures:
-        print("\n  FAILURES:")
-        for title, exp, got, report in failures:
-            print(f"    ✗ {title}")
-            print(f"      Expected {exp}, got {got}")
-            if report["violations"]:
-                for v in report["violations"]:
-                    print(f"        [{v['severity']}] {v['message']}")

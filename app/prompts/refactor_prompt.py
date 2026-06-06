@@ -1,4 +1,4 @@
-def _refactor_prompt(instruction: str, inputs: list[str], extra_rules: list[str] = []) -> str:
+def _refactor_prompt(instruction: str, inputs: list[str], extra_rules: tuple[str, ...] = ()) -> str:
     return "\n".join([
         "You are a code refactoring engineer.",
         instruction,
@@ -9,8 +9,8 @@ def _refactor_prompt(instruction: str, inputs: list[str], extra_rules: list[str]
         "## Refactoring Rules",
         "",
         "### Correctness",
-        "- Address every issue in the report — no exceptions",
-        "- Do not add new features or logic not implied by the report",
+        "- Address every issue you are asked to fix — no exceptions",
+        "- Do not add new features or logic not implied by the directives",
         "- Do not remove or alter existing functionality",
         "- Preserve original function signatures and class names",
         "- Keep all existing imports; add only what the fixes require",
@@ -54,14 +54,22 @@ def _refactor_prompt(instruction: str, inputs: list[str], extra_rules: list[str]
     ])
 
 
+# First pass — fixes the architect's vetted, prioritized directives.
 REFACTOR_SYSTEM_PROMPT = _refactor_prompt(
-    instruction="Given a code and its analysis report, refactor the code to fix ALL flagged issues.",
+    instruction=(
+        "You are given code and a prioritized list of refactor directives produced by a senior "
+        "software architect who has already reviewed the static-analysis findings and discarded "
+        "every false positive. Every directive listed is real — apply ALL of them, working from "
+        "the highest severity down."
+    ),
     inputs=[
         "The code to refactor",
-        "The full analysis report listing all issues to fix",
+        "The architect's prioritized refactor directives (already vetted — fix every one)",
     ],
 )
 
+
+# Re-entry after the comparator returns FAIL.
 REFACTOR_SYSTEM_PROMPT2 = _refactor_prompt(
     instruction=(
         "The comparator has reviewed your refactored code and found remaining issues. "
@@ -69,16 +77,32 @@ REFACTOR_SYSTEM_PROMPT2 = _refactor_prompt(
         "Fix ONLY the numbered actions listed there — nothing more, nothing less."
     ),
     inputs=[
-        "The original code",
-        "The full analysis report (for context only — do not re-fix already resolved issues)",
         "Your previous refactored version (the code to fix)",
         "The comparator report containing the exact Refactor Instructions to follow",
     ],
-    extra_rules=[
+    extra_rules=(
         "- Fix ONLY what is listed in the 'Refactor Instructions' section of the comparator report",
         "- Do not re-fix issues already marked RESOLVED by the comparator",
         "- Do not regress any fix that was already correct in your previous version",
         "- If an instruction says UNRESOLVED, the fix was missed — apply it now",
         "- If an instruction says REGRESSED, your previous fix introduced it — undo or correct it",
+    ),
+)
+
+
+# Re-entry after a syntax or runtime error.
+REFACTOR_SYNTAX_PROMPT = _refactor_prompt(
+    instruction=(
+        "Your previously refactored code failed to compile or run. Fix ONLY the reported error "
+        "so the code becomes valid and runnable. Do not change anything else and do not undo "
+        "any correct refactor."
+    ),
+    inputs=[
+        "Your previous refactored version (the code to fix)",
+        "The exact SyntaxError / runtime error to fix",
     ],
+    extra_rules=(
+        "- Make the minimal change required to resolve the reported error",
+        "- Do not re-architect or add changes beyond fixing the error",
+    ),
 )

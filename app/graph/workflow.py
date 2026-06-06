@@ -3,26 +3,61 @@ from langgraph.graph import StateGraph, START, END
 import ast
 
 from schemas import AgentState
-from agents import refactor_agent, comparator_agent
+from agents import refactor_agent, comparator_agent , translate_from_python , translate_to_python , architect_agent
 from tools import analysis_tool, execute_code_tool
-from .routers import analyzer_router, syntax_check_router, comparator_router, executer_router
-from .nodes import validate_refactored_code, clear_executer_memory, analyzer_function, executer_function
+from .routers import analyzer_router, syntax_check_router, comparator_router, executer_router, main_router , translator_router , syntax_check_router2 , route_after_architect
+from .nodes import validate_refactored_code,validate_translator_code , clear_executer_memory, analyzer_function, executer_function, detect_language 
 
 def build_graph():
     graph = StateGraph(AgentState)
+    graph.add_node("detect_language", detect_language)
     graph.add_node("analyzer", analyzer_function)
+    graph.add_node("architect", architect_agent)
     graph.add_node("executer", executer_function)
     graph.add_node("Refactor Agent", refactor_agent)
     graph.add_node("Comparator Agent", comparator_agent)
+    graph.add_node("Translate to Python", translate_to_python)
+    graph.add_node("Translate from Python", translate_from_python)
     graph.add_node("syntax_check", validate_refactored_code)
+    graph.add_node("syntax_check2", validate_translator_code)
     graph.add_node("clear_executer_memory", clear_executer_memory)
 
-    graph.add_edge(START, "analyzer")
+    graph.add_edge(START, "detect_language")
 
     graph.add_conditional_edges(
-        "analyzer",
-        analyzer_router,
+        "detect_language",
+        main_router,
         {
+            "end": END,
+            "analyzer": "analyzer",
+            "translator": "Translate to Python"
+        }
+    )
+    graph.add_conditional_edges(
+        "Translate to Python",
+        translator_router,
+        {
+            "analyzer": "syntax_check2",
+            "end": END,
+        }
+    )
+
+    graph.add_conditional_edges(
+        "syntax_check2",
+        syntax_check_router2,
+        {
+            "fix": "Translate to Python",
+            "proceed": "analyzer"
+        }
+    )
+
+    graph.add_edge("analyzer", "architect")
+
+    graph.add_conditional_edges(
+        "architect",
+        route_after_architect,
+        {
+            'END': END,
             "refactor": "Refactor Agent",
             "comparator": "Comparator Agent",
         },
@@ -46,7 +81,7 @@ def build_graph():
         {
             "refactor": "Refactor Agent",
             "executer": "executer",
-            "end": END,
+            "end": "Translate from Python",
         },
     )
 
@@ -55,6 +90,7 @@ def build_graph():
         executer_router,
         {
             "refactor": "Refactor Agent",
+            "translator": "Translate from Python",
             "end": END,
         }
     )

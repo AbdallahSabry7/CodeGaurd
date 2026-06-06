@@ -76,3 +76,4 @@ watchdog==6.0.0
 xxhash==3.6.0
 zstandard==0.25.0
 pydantic-settings==2.14.1
+Pygments==2.20.0
