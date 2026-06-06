@@ -23,3 +23,4 @@ class AgentState(TypedDict):
     architect_verdict:        Optional[str]
     architect_baseline_report: Optional[dict]
     architect_rejected:        Optional[list[dict]]
+    syntax_iterations:         int

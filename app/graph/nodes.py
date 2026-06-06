@@ -7,7 +7,7 @@ import re
 def validate_translator_code(state: AgentState) -> dict:
     iterations = state.get("refactor_iterations", 0)
     if iterations == 0:
-        code = state.get("original_code_coverted", "")
+        code = state.get("original_code_converted", "")
     else:
         code = state.get("refactored_code", "")
     try:
@@ -24,15 +24,11 @@ def validate_refactored_code(state: AgentState) -> dict:
     except SyntaxError as e:
         return {"refactor_syntax_error": f"SyntaxError at line {e.lineno}: {e.msg}"}
 
-
-def clear_executer_memory(state: AgentState) -> dict:
-    return {"executer_messages": []}
-
 def analyzer_function(state: AgentState) -> str:
     if state.get("refactored_code"):
         code_to_analyze = state["refactored_code"]
-    elif state.get("original_code_coverted"):
-        code_to_analyze = state["original_code_coverted"]
+    elif state.get("original_code_converted"):
+        code_to_analyze = state["original_code_converted"]
     else:
         code_to_analyze = state["original_code"]
 
@@ -122,7 +118,7 @@ def detect_language(state: AgentState) -> dict:
 
     # ── Empty input ───────────────────────────────────────────────
     if not code.strip():
-        return {"source_language": "unknown", "reason": "empty input"}
+        return {"source_language": "unknown"}
 
     # ── Step 1: check unsupported languages ───────────────────────
     unsupported_lang = None

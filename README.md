@@ -1,279 +1,220 @@
 # 🛡️ CodeGuard
 
 > Multi-agent Python code analysis and automated refactoring powered by LangGraph.
-
----
+> 
 
 ## What is CodeGuard?
 
-CodeGuard is an agentic pipeline that takes raw Python code, analyzes it for quality issues, automatically refactors it, and validates the result — all without human intervention.
+CodeGuard is an agentic pipeline that takes raw code, detects its language, analyzes it for quality issues, automatically refactors it, and validates the result — all without human intervention. Python is analyzed directly; Java and C++ are translated to Python, processed, then translated back.
 
-### Architecture
+## Architecture
 
-CodeGuard is built on **LangGraph**, a framework for building stateful multi-agent workflows as directed graphs. The system is composed of two LLM agents and three plain-function nodes, each with a specific role:
+CodeGuard is built on **LangGraph**. The pipeline is composed of **four LLM agents** and several deterministic plain-function nodes wired together as a directed graph with conditional edges and a hard cap of `max_iterations` (default 3) refactor loops.
 
-```
-[Input Code]
-     │
-     ▼
-┌─────────────┐
-│  Analyzer   │ ◄──── analysis_tool (complexity + SOLID + clean code index)
-│  (function) │       called directly — no LLM, no message history
-└──────┬──────┘
-       │  original_analyzer_report (captured once, never overwritten)
-       ▼
-┌─────────────┐
-│  Refactor   │ ◄──── LLM rewrites code based on analysis report
-│   Agent     │       REFACTOR_SYSTEM_PROMPT (1st pass)
-│   (LLM)     │       REFACTOR_SYSTEM_PROMPT2 (subsequent passes)
-└──────┬──────┘
-       │  refactored_code
-       ▼
-┌─────────────┐     SyntaxError + error message
-│   Syntax    │ ──────────────────────────────► Refactor Agent (retry)
-│   Check     │
-│  (function) │  ast.parse() only — no LLM
-└──────┬──────┘
-       │  valid code
-       ▼
-┌─────────────┐               ┌──────────────┐
-│  Analyzer   │ ── report ──► │  Comparator  │ ◄──── diffs original vs refactored report
-│  (function) │               │    Agent     │       RESOLVED / UNRESOLVED / REGRESSED
-│  re-analyze │               │    (LLM)     │       outputs numbered Refactor Instructions
-│ refactored  │               └──────┬───────┘              on FAIL
-│    code     │                      │
-└─────────────┘            PASS ─────┼───── FAIL ──► Refactor Agent (max 3 iterations)
-                                     ▼
-                              ┌─────────────┐
-                              │  Executor   │ ◄──── execute_code_tool
-                              │ (function)  │       runs code in Docker sandbox
-                              └──────┬──────┘       no LLM involved
-                                     │
-                          PASS ──► END
-                          FAIL ──► Refactor Agent (counted in refactor iterations)
+```mermaid
+flowchart TD
+    Start([Input code]) --> Detect["Detect Language (plain fn)"]
+    Detect -->|unsupported / unknown| End1([END])
+    Detect -->|python| Analyze["Analyzer (analysis_tool)"]
+    Detect -->|java / cpp| ToPy["Translate to Python (LLM)"]
+    ToPy --> SynT["Syntax Check - translation (ast.parse)"]
+    SynT -->|fix| ToPy
+    SynT -->|proceed| Analyze
+    Analyze --> Arch["Architect Agent (LLM)"]
+    Arch -->|HALT_PERFECT_ENOUGH| End2([END])
+    Arch -->|directives| Refactor["Refactor Agent (LLM)"]
+    Arch -->|re-entry| Compare["Comparator Agent (LLM)"]
+    Refactor --> Syn["Syntax Check (ast.parse)"]
+    Syn -->|fix| Refactor
+    Syn -->|proceed| Analyze
+    Compare -->|FAIL| Refactor
+    Compare -->|PASS| Exec["Executor (Docker sandbox)"]
+    Compare -->|done, non-python| FromPy["Translate from Python (LLM)"]
+    Exec -->|FAIL| Refactor
+    Exec -->|PASS, non-python| FromPy
+    Exec -->|PASS, python| End3([END])
+    FromPy --> End4([END])
 ```
 
-**LLM Agents** — only two nodes use a language model:
-- **Refactor Agent** — rewrites code to fix all flagged issues. Uses `REFACTOR_SYSTEM_PROMPT` on the first pass and `REFACTOR_SYSTEM_PROMPT2` on subsequent passes (fixes only what the Comparator or Executor flagged, without regressing already-resolved issues).
-- **Comparator Agent** — receives `original_analyzer_report` + `analyzer_report` (refactored). Diffs them, classifies every issue as `RESOLVED` / `UNRESOLVED` / `REGRESSED`, and outputs numbered Refactor Instructions on `FAIL`. No tools, no code — reports only.
+### LLM agents (four)
 
-**Plain-function nodes** — three nodes run deterministic logic with no LLM:
-- **Analyzer** — calls `analysis_tool` directly. Runs twice: once on the original code (result stored as `original_analyzer_report`, never overwritten), and once on the refactored code before the Comparator.
-- **Syntax Check** — runs `ast.parse()` on the refactored code. Sends the error message back to the Refactor Agent on failure; continues to re-analysis on success.
-- **Executor** — calls `execute_code_tool` directly. Runs the refactored code in a Docker sandbox and sends runtime errors back to the Refactor Agent.
+- **Translator Agent** — converts Java/C++ → Python before analysis, and Python → the original language after refactoring. Runs only for non-Python input.
+- **Architect Agent** — runs after every analyzer pass. Consumes the raw analyzer report, validates its own output against a Pydantic schema (with retries), classifies findings (SOLID / Clean Code / Complexity) with severity + confidence, and emits a numbered, severity-sorted list of **refactor directives**. The global verdict (`PROCEED_TO_REFACTOR` vs `HALT_PERFECT_ENOUGH`) is recomputed in code, never trusted from the model.
+- **Refactor Agent** — rewrites code to satisfy the Architect's directives on the first pass, and on re-entry fixes only what the Syntax Check, Comparator, or Executor flagged.
+- **Comparator Agent** — diffs the baseline Architect report against the latest one and returns PASS / FAIL.
 
-**Tools** are Python functions decorated with `@tool`:
-- `analysis_tool` — single merged tool: time & space complexity, SOLID violations (SRP/OCP/LSP/ISP/DIP), and clean code index. Called directly by the Analyzer function — not by any LLM.
-- `execute_code_tool` — runs code in a Docker sandbox (`python:3.11-slim`), 10s timeout, 128MB memory, network disabled. Called directly by the Executor function — not by any LLM.
+### Plain-function nodes (no LLM)
 
-**The Graph** (defined in `graph.py`) wires the nodes together with conditional edges:
-- **Syntax Check** loops back to Refactor Agent on `ast.parse()` failure
-- **Comparator Agent** loops back to Refactor Agent if any issue is `UNRESOLVED` or `REGRESSED`
-- **Executor** loops back to Refactor Agent on runtime errors
-- Maximum of **3 refactor iterations** before the pipeline exits
+- **Detect Language** — regex scoring with positive/negative signals to pick Python / Java / C++ or mark input unsupported/unknown.
+- **Analyzer** — calls `analysis_tool` directly. The first run is captured as the baseline report.
+- **Syntax Check** — `ast.parse()` on refactored (and separately on translated) code; loops back on failure.
+- **Executor** — calls `execute_code_tool` to run the code in a Docker container.
 
-**State** (`AgentState`) is a typed dictionary shared across all nodes:
+### Tools
 
-| Field | Description |
-|-------|-------------|
-| `original_code` | Input code — never changes |
-| `refactored_code` | Latest refactor output |
-| `original_analyzer_report` | Captured on first Analyzer run — never overwritten |
-| `analyzer_report` | Overwritten each Analyzer run (used as Comparator's refactored report) |
-| `comparator_report` | Latest Comparator output, fed back to Refactor Agent on FAIL |
-| `syntax_error` | Populated by Syntax Check on failure, cleared on success |
-| `execution_result` | Populated by Executor, fed back to Refactor Agent on FAIL |
-| `refactor_iterations` | Loop counter — hard stop at 3 |
+- `analysis_tool` — single merged tool: time & space complexity, SOLID violations (SRP / OCP / LSP / ISP / DIP), and a clean-code index.
+- `execute_code_tool` — runs code in a Docker container, auto-installing third-party imports via pip before execution.
 
----
+## Models
 
-### Project Structure
+| Node | Type | Model (default) | Provider | Temp |
+| --- | --- | --- | --- | --- |
+| Detect Language | Plain fn | — | — | — |
+| Translator | LLM | `model3` (e.g. `llama-3.3-70b-versatile`) | Groq | 0.2 |
+| Analyzer | Plain fn | — | — | — |
+| Architect | LLM | `meta-llama/llama-4-scout-17b-16e-instruct` | Groq | 0 |
+| Refactor | LLM | `model1` (e.g. `openrouter/owl-alpha`) | OpenRouter | 0.2 |
+| Syntax Check | Plain fn | — | — | — |
+| Comparator | LLM | `model2` (e.g. `llama-4-scout-17b-16e-instruct`) | Groq | 0.1 |
+| Executor | Plain fn | — | — | — |
+
+## Project Structure
 
 ```
 CodeGuard/
 ├── app/
-│   ├── __init__.py
 │   ├── agents/
-│   │   ├── __init__.py
-│   │   ├── refactor.py          # Refactor Agent node (LLM)
-│   │   └── comparator.py        # Comparator Agent node (LLM)
-│   ├── nodes/
-│   │   ├── __init__.py
-│   │   ├── analyzer.py          # Analyzer node (plain function)
-│   │   ├── syntax_check.py      # Syntax Check node (plain function)
-│   │   └── executor.py          # Executor node (plain function)
-│   ├── tools/
-│   │   ├── __init__.py
-│   │   ├── analysis_tool.py     # complexity + SOLID + clean code index
-│   │   └── execute_tool.py      # Docker sandbox runner
-│   ├── analysis/
-│   │   ├── __init__.py
-│   │   └── complexity.py        # AST-based complexity analyzer
+│   │   ├── architect.py        # Architect Agent (LLM)
+│   │   ├── comparator.py       # Comparator Agent (LLM)
+│   │   ├── refactor.py         # Refactor Agent (LLM)
+│   │   └── translator.py       # Translator Agent (LLM)
+│   ├── graph/
+│   │   ├── __init__.py         # exposes build_graph
+│   │   ├── nodes.py            # plain-function nodes + language detection
+│   │   ├── routers.py          # conditional-edge routing logic
+│   │   └── workflow.py         # StateGraph wiring (build_graph)
+│   ├── helpers/
+│   │   └── config.py           # pydantic-settings
 │   ├── prompts/
-│   │   ├── __init__.py
-│   │   ├── refactor.py          # REFACTOR_SYSTEM_PROMPT, REFACTOR_SYSTEM_PROMPT2
-│   │   └── comparator.py        # COMPARATOR_PROMPT
-│   ├── config.py                # pydantic-settings: all env vars and constants
-│   ├── state.py                 # AgentState TypedDict
-│   ├── graph.py                 # LangGraph graph definition and routing logic
-│   └── llms.py                  # LLM instantiation (Groq + OpenRouter)
-│
-├── ui/
-│   ├── __init__.py
-│   └── streamlit_app.py         # Streamlit web UI (no imports from ui/ in core app/)
-│
-├── scripts/
-│   └── cli.py                   # CLI entry point (replaces main.py + code_to_analyze.py)
-│
-├── tests/
-│   ├── __init__.py
-│   ├── conftest.py
-│   ├── unit/
-│   │   ├── test_analyzer.py
-│   │   ├── test_syntax_check.py
-│   │   └── test_complexity.py
-│   └── integration/
-│       ├── test_graph_routing.py
-│       └── test_executor.py     # requires Docker
-│
-├── .env.example                 # template — safe to commit
-├── .gitignore
-├── .pre-commit-config.yaml      # ruff + mypy on commit
-├── pyproject.toml               # replaces requirements.txt; includes tool config
+│   │   ├── architect_prompt.py
+│   │   ├── comparator_prompt.py
+│   │   ├── refactor_prompt.py
+│   │   └── translator_prompt.py
+│   ├── schemas/
+│   │   └── state.py            # AgentState TypedDict
+│   ├── services/
+│   │   ├── SRP_Detection_Final.py
+│   │   ├── OCP_Detection_Final.py
+│   │   ├── Liskov_Substitution_Principle.py
+│   │   ├── ISP_detect.py
+│   │   ├── dependancy_principle.py
+│   │   ├── clean_code.py
+│   │   ├── complexity.py
+│   │   ├── executer.py         # Docker sandbox runner
+│   │   └── tests/              # calibration scripts (SRP / LSP / DIP)
+│   ├── tools/
+│   │   ├── analysis_tool.py
+│   │   └── execute_code_tool.py
+│   ├── app.py                  # Streamlit web UI
+│   ├── main.py                 # CLI entry point
+│   ├── llms.py                 # LLM instantiation (Groq + OpenRouter)
+│   ├── requirements.txt
+│   └── .env.example
 ├── LICENSE
 └── README.md
 ```
 
----
-
 ## Requirements
 
 - Python 3.11+
-- [Docker Desktop](https://www.docker.com/products/docker-desktop/) (must be running)
-- A [Groq](https://console.groq.com) API key (free)
-- An [OpenRouter](https://openrouter.ai) API key (free)
-- A [LangSmith](https://smith.langchain.com) API key (free, for tracing)
-
----
+- Docker Desktop (must be running)
+- A Groq API key (free)
+- An OpenRouter API key (free)
+- A LangSmith API key (optional, for tracing)
 
 ## Installation
 
-### 1. Clone the repository
-
 ```bash
 git clone https://github.com/AbdallahSabry7/CodeGuard.git
-cd CodeGuard
-```
+cd CodeGuard/app
 
-### 2. Create and activate a virtual environment
-
-```bash
 python -m venv venv
-
 # Windows
 venv\Scripts\activate
-
 # macOS / Linux
 source venv/bin/activate
+
+pip install -r requirements.txt
 ```
-
-### 3. Install dependencies
-
-```bash
-pip install -e ".[dev]"
-```
-
----
 
 ## Environment Setup
 
-Copy the example env file and fill in your keys:
+Copy the example env file (in `app/`) and fill in your keys:
 
 ```bash
 cp .env.example .env
 ```
 
-```env
-GROQ_API_KEY=your_groq_api_key_here
-OPENROUTER_API_KEY=your_openrouter_api_key_here
-LANGSMITH_API_KEY=your_langsmith_api_key_here
+```bash
+GROQ_API_KEY=
+OPENROUTER_API_KEY=
+LANGSMITH_API_KEY=
+LANGCHAIN_TRACING_V2=true
+LANGCHAIN_ENDPOINT=https://api.smith.langchain.com
+LANGCHAIN_PROJECT=CodeGuard
+
+model1=openrouter/owl-alpha
+model2=meta-llama/llama-4-scout-17b-16e-instruct
+model3=llama-3.3-70b-versatile
+openai_api_base=https://openrouter.ai/api/v1
+
+max_iterations=3
 ```
 
 | Key | Where to get it |
-|-----|----------------|
-| `GROQ_API_KEY` | [console.groq.com](https://console.groq.com) → API Keys |
-| `OPENROUTER_API_KEY` | [openrouter.ai/keys](https://openrouter.ai/keys) |
-| `LANGSMITH_API_KEY` | [smith.langchain.com](https://smith.langchain.com) → Settings → API Keys |
-
----
+| --- | --- |
+| `GROQ_API_KEY` | console.groq.com → API Keys |
+| `OPENROUTER_API_KEY` | openrouter.ai/keys |
+| `LANGSMITH_API_KEY` | smith.langchain.com → Settings → API Keys |
 
 ## Docker Setup
 
-CodeGuard executes refactored code inside an isolated Docker container for safety. Docker Desktop must be installed and **running** before you start CodeGuard.
-
-### 1. Install Docker Desktop
-
-Download and install from: https://www.docker.com/products/docker-desktop/
-
-### 2. Start Docker Desktop
-
-Open Docker Desktop and wait until the status shows **"Engine running"** in the bottom left.
-
-### 3. Pull the Python image
+CodeGuard executes refactored code inside a Docker container. Docker Desktop must be installed and **running** before you start CodeGuard.
 
 ```bash
 docker pull python:3.11-slim
+docker run --rm python:3.11-slim python --version   # should print Python 3.11.x
 ```
 
-This is the sandboxed environment CodeGuard uses to run code. It only needs to be pulled once.
+<aside>
+⚠️
 
-### 4. Verify Docker is working
+**Security note — the sandbox is hardened but not network-isolated.** The Executor runs with `cap_drop=["ALL"]`, `no-new-privileges`, a 128 MB memory cap, a 64-process limit, and a 60-second timeout. However, **network access is enabled** and the **filesystem is writable**, because the Executor auto-installs third-party imports with `pip` at runtime. Dangerous calls/imports (`eval`, `exec`, `subprocess`, `socket`, etc.) are hard-blocked by an AST check; sandbox-incompatible but harmless patterns (`os`, `sys`, `open`, ...) are reported as PASS with a note. Do not treat this as a fully isolated sandbox for untrusted code.
 
-```bash
-docker run --rm python:3.11-slim python --version
-```
+</aside>
 
-You should see `Python 3.11.x`. If you get an error, make sure Docker Desktop is running.
+### Sandbox constraints (actual)
 
-> **Sandbox constraints:** The container runs with no network access, a read-only filesystem, 128MB memory limit, and a 10-second timeout. It is automatically removed after each run.
-
----
+| Constraint | Value |
+| --- | --- |
+| Base image | `python:3.11-slim` |
+| Timeout | 60 seconds |
+| Memory limit | 128 MB |
+| CPU quota | 50000 |
+| PID limit | 64 |
+| Network | Enabled (for pip install) |
+| Filesystem | Writable |
+| Capabilities | `cap_drop=ALL`, `cap_add=[SETUID, SETGID]`, `no-new-privileges` |
+| Output cap | 4000 chars (stdout/stderr each) |
 
 ## Usage
+
+Run commands from inside the `app/` directory.
 
 ### Web UI (Streamlit)
 
 ```bash
-streamlit run ui/streamlit_app.py
+streamlit run app.py
 ```
 
-Open http://localhost:8501 in your browser. Paste your Python code or upload a `.py` file and click **Run Analysis**. Results stream live across four tabs: Analysis Report, Refactored Code, Comparator Report, and Execution Result.
+Open the local URL Streamlit prints. Paste Python (or Java/C++) code and run the analysis; results stream across the report, refactored-code, comparator, and execution views.
 
 ### CLI
 
 ```bash
-# Analyze a file
-python scripts/cli.py --file path/to/your_code.py
-
-# Analyze from stdin
-cat your_code.py | python scripts/cli.py --stdin
+python main.py --file path/to/your_code.py
+cat your_code.py | python main.py --stdin
 ```
-
----
-
-## Models
-
-| Node | Type | Model | Provider |
-|------|------|-------|----------|
-| Analyzer | Plain function | — | — |
-| Refactor Agent | LLM | `poolside/laguna-m.1:free` | OpenRouter |
-| Syntax Check | Plain function | — | — |
-| Comparator Agent | LLM | `meta-llama/llama-4-scout-17b-16e-instruct` | Groq |
-| Executor | Plain function | — | — |
-
-> Both LLM nodes use `temperature=0`. The Comparator uses `max_retries=2`. All `.bind_tools()` calls use `parallel_tool_calls=False`.
-
----
 
 ## License
 

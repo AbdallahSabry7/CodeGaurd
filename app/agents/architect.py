@@ -106,16 +106,16 @@ def _flatten_directives(report: ArchitectReport) -> list[dict]:
     items: list[dict] = []
     for v in report.solid_violations:
         items.append({"category": "SOLID", "label": v.principle, "location": v.location,
-                      "severity": v.severity, "directive": v.refactor_directive})
+                    "severity": v.severity, "directive": v.refactor_directive})
     for v in report.clean_code_violations:
         items.append({"category": "Clean Code", "label": v.issue_name, "location": v.location,
-                      "severity": v.severity, "directive": v.refactor_directive})
+                    "severity": v.severity, "directive": v.refactor_directive})
     for c in report.complexity_findings:
         if c.improvable and c.refactor_directive:
             items.append({"category": "Complexity",
-                          "label": f"{c.type} {c.current} -> {c.target}",
-                          "location": c.location, "severity": "HIGH",
-                          "directive": c.refactor_directive})
+                        "label": f"{c.type} {c.current} -> {c.target}",
+                        "location": c.location, "severity": "HIGH",
+                        "directive": c.refactor_directive})
     items.sort(key=lambda i: _SEVERITY_RANK.get(i["severity"], 4))
     for idx, item in enumerate(items, start=1):
         item["id"] = idx
@@ -136,7 +136,7 @@ def _merge_rejected(existing: list[dict], new: list) -> list[dict]:
 
 
 def _run_architect(language, code, analyzer_report, previously_rejected=None,
-                   max_retries=2) -> ArchitectReport:
+                max_retries=2) -> ArchitectReport:
     """Call the LLM, validate against the schema, retry on malformed output."""
     previously_rejected = previously_rejected or []
     messages = [
@@ -177,6 +177,7 @@ def architect_agent(state: "AgentState") -> dict:
         "architect_rejected": _merge_rejected(
             state.get("architect_rejected", []), report.rejected_issues),
     }
+    
     # vetted baseline = first cleaned report; captured once, never overwritten
     if state.get("architect_baseline_report") is None:
         out["architect_baseline_report"] = report.model_dump()

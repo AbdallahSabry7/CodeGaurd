@@ -22,10 +22,14 @@ def syntax_check_router(state: AgentState) -> str:
     return "proceed"
 
 def syntax_check_router2(state: AgentState) -> str:
-    if state.get("translator_syntax_error"):
-        return "fix"
+    iterations = state.get("syntax_iterations", 0)
+    if iterations >= max_iterations:
+        return "end"
     else:
-        return "proceed"
+        if state.get("translator_syntax_error"):
+            return "fix"
+        else:
+            return "proceed"
 
 
 

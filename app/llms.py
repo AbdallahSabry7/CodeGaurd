@@ -5,7 +5,7 @@ from helpers.config import get_settings, Settings
 
 settings = get_settings()
 
-LLM = chatGroq = ChatGroq(
+LLM = ChatGroq(
     model= settings.model3,
     api_key=settings.GROQ_API_KEY,
     temperature=0.2,

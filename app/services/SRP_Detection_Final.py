@@ -629,128 +629,105 @@ def get_srp_report(code: str, weights: dict | None = None) -> list[dict]:
 
     Args:
         code:    Python source as a string.
-        weights: Optional dict to override scoring weights. Keys:
-                   object_diversity, effective_domain_div, lcom,
-                   body_domain_div, size_factor, responsibility_factor
-                 Values are relative (normalized to sum=1 internally).
+        weights: Optional dict to override scoring weights.
 
     Returns:
-        List of result dicts, one per class found.
+        List of result dicts for classes with violations, or a global Pass.
     """
     try:
         tree = ast.parse(code)
         analyzer = SRPAnalyzerEnhanced(weights=weights)
         analyzer.visit(tree)
 
+        # Handle the case where the file has no classes at all
         if not analyzer.report:
             return [{
                 "status":     "Pass",
                 "confidence": "high",
                 "reason":     "No classes detected.",
-                # "suggestion": "Define a class to see SRP analysis.",
             }]
 
         results = []
         for class_name, data in analyzer.report.items():
+            status = data["status"]
+            
+            # Skip adding to results if the class passed
+            if status not in ("Violation", "Review"):
+                continue
+
             diag         = data.get("diagnostics", {})
             ctor         = data.get("constructor", {})
             score        = data["srp_violation_score"]
-            status       = data["status"]
             conf         = data["confidence"]
             domains      = diag.get("detected_domains", [])
             body_domains = diag.get("body_detected_domains", [])
 
-            if status in ("Violation", "Review"):
-                fired: list[str] = []
-                if diag.get("object_diversity", 0) > 0.5:
-                    fired.append("methods depend on unrelated collaborators")
-                if diag.get("effective_domain_div", 0) > 0.2:
-                    fired.append(f"name-inferred domains: {', '.join(domains)}")
-                if diag.get("effective_body_domain_div", 0) > 0.2:
-                    extra = [d for d in body_domains if d not in domains]
-                    if extra:
-                        fired.append(f"body-detected extra domains: {', '.join(extra)}")
-                    else:
-                        fired.append(f"body scan confirms cross-domain activity: {', '.join(body_domains)}")
-                if "__dispatch__" in body_domains:
-                    fired.append("type-dispatch flag (self.attr == literal) signals multiple responsibilities")
-                if diag.get("lcom", 0) > 0.5:
-                    collabs = diag.get("collaborator_attrs", [])
-                    if collabs:
-                        fired.append(f"disjoint collaborator usage ({', '.join(collabs[:4])})")
-                    else:
-                        fired.append("methods share few instance variables (low cohesion)")
-                if diag.get("size_factor", 0) > 0.3:
-                    fired.append("large/complex methods spread across the class")
-                if diag.get("responsibility_factor", 0) > 0:
-                    fired.append("'And'/'Or' in method names signals multiple responsibilities")
-                if ctor.get("injection_score", 0) > 0.3:
-                    n_c   = ctor.get("collaborator_count", 0)
-                    inj_d = ctor.get("injected_domains", [])
-                    fired.append(
-                        f"constructor injects {n_c} collaborators across domains: "
-                        f"{', '.join(inj_d)}"
-                    )
-                if diag.get("delegator_ratio", 0) > 0.5:
-                    cross = diag.get("safe_delegator_ratio", 0) < diag.get("delegator_ratio", 0)
-                    note  = "cross-domain" if cross else "same-domain"
-                    fired.append(
-                        f"note: {int(diag['delegator_ratio']*100)}% thin delegators "
-                        f"({note} — {'penalty applied' if cross else 'penalty reduced'})"
-                    )
-
-                reason_str    = "; ".join(fired) if fired else "multiple heuristics fired"
-                display_domains = [d for d in (body_domains or domains) if d != "__dispatch__"]
-                domain_hint   = (
-                    f" one per domain ({', '.join(display_domains)})"
-                    if display_domains else ""
-                )
-                threshold_note = f" (threshold: {diag.get('adaptive_threshold', 18)}%)"
-
-                if status == "Review":
-                    results.append({
-                        "class":      class_name,
-                        "status":     "Review",
-                        "confidence": conf,
-                        "score":      score,
-                        "reason":     (
-                            f"Class '{class_name}' scored {score}%{threshold_note} — "
-                            f"borderline result, manual review recommended. {reason_str}."
-                        ),
-                        # "suggestion": (
-                        #     f"Inspect '{class_name}' for mixed concerns,{domain_hint}. "
-                        #     "Score is in the uncertain zone; context matters here."
-                        # ),
-                        # "diagnostics": diag,
-                        # "constructor": ctor,
-                    })
+            fired: list[str] = []
+            
+            # Heuristic checks
+            if diag.get("object_diversity", 0) > 0.5:
+                fired.append("methods depend on unrelated collaborators")
+            if diag.get("effective_domain_div", 0) > 0.2:
+                fired.append(f"name-inferred domains: {', '.join(domains)}")
+            if diag.get("effective_body_domain_div", 0) > 0.2:
+                extra = [d for d in body_domains if d not in domains]
+                if extra:
+                    fired.append(f"body-detected extra domains: {', '.join(extra)}")
                 else:
-                    results.append({
-                        "class":      class_name,
-                        "status":     "Violation",
-                        "confidence": conf,
-                        "score":      score,
-                        "reason":     (
-                            f"Class '{class_name}' scored {score}%{threshold_note} — "
-                            f"{reason_str}."
-                        ),
-                        # "suggestion": (
-                        #     f"Split '{class_name}' into focused classes,{domain_hint}."
-                        # ),
-                        # "diagnostics": diag,
-                        # "constructor": ctor,
-                    })
+                    fired.append(f"body scan confirms cross-domain activity: {', '.join(body_domains)}")
+            if "__dispatch__" in body_domains:
+                fired.append("type-dispatch flag (self.attr == literal) signals multiple responsibilities")
+            if diag.get("lcom", 0) > 0.5:
+                collabs = diag.get("collaborator_attrs", [])
+                if collabs:
+                    fired.append(f"disjoint collaborator usage ({', '.join(collabs[:4])})")
+                else:
+                    fired.append("methods share few instance variables (low cohesion)")
+            if diag.get("size_factor", 0) > 0.3:
+                fired.append("large/complex methods spread across the class")
+            if diag.get("responsibility_factor", 0) > 0:
+                fired.append("'And'/'Or' in method names signals multiple responsibilities")
+            if ctor.get("injection_score", 0) > 0.3:
+                n_c   = ctor.get("collaborator_count", 0)
+                inj_d = ctor.get("injected_domains", [])
+                fired.append(f"constructor injects {n_c} collaborators across domains: {', '.join(inj_d)}")
+            if diag.get("delegator_ratio", 0) > 0.5:
+                cross = diag.get("safe_delegator_ratio", 0) < diag.get("delegator_ratio", 0)
+                note  = "cross-domain" if cross else "same-domain"
+                fired.append(
+                    f"note: {int(diag['delegator_ratio']*100)}% thin delegators "
+                    f"({note} — {'penalty applied' if cross else 'penalty reduced'})"
+                )
+
+            # Format the final reason string
+            reason_str     = "; ".join(fired) if fired else "multiple heuristics fired"
+            threshold_note = f" (threshold: {diag.get('adaptive_threshold', 18)}%)"
+
+            if status == "Review":
+                reason_msg = (
+                    f"Class '{class_name}' scored {score}%{threshold_note} — "
+                    f"borderline result, manual review recommended. {reason_str}."
+                )
             else:
-                results.append({
-                    "class":      class_name,
-                    "status":     "Pass",
-                    "confidence": conf,
-                    "score":      score,
-                    "reason":     f"Class '{class_name}' appears cohesive (score: {score}%).",
-                    # "suggestion": "No refactor needed.",
-                    # "diagnostics": diag,
-                    # "constructor": ctor,
-                })
+                reason_msg = (
+                    f"Class '{class_name}' scored {score}%{threshold_note} — {reason_str}."
+                )
+
+            results.append({
+                "class":      class_name,
+                "status":     status,
+                "confidence": conf,
+                "score":      score,
+                "reason":     reason_msg,
+            })
+
+        # If we went through all classes and found nothing wrong, return a single pass
+        if not results:
+            return [{
+                "status":     "Pass",
+                "confidence": "high",
+                "reason":     "No violations detected.",
+            }]
 
         return results
 

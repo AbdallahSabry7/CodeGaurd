@@ -6,7 +6,7 @@ from schemas import AgentState
 from agents import refactor_agent, comparator_agent , translate_from_python , translate_to_python , architect_agent
 from tools import analysis_tool, execute_code_tool
 from .routers import analyzer_router, syntax_check_router, comparator_router, executer_router, main_router , translator_router , syntax_check_router2 , route_after_architect
-from .nodes import validate_refactored_code,validate_translator_code , clear_executer_memory, analyzer_function, executer_function, detect_language 
+from .nodes import validate_refactored_code,validate_translator_code , analyzer_function, executer_function, detect_language 
 
 def build_graph():
     graph = StateGraph(AgentState)
@@ -20,7 +20,6 @@ def build_graph():
     graph.add_node("Translate from Python", translate_from_python)
     graph.add_node("syntax_check", validate_refactored_code)
     graph.add_node("syntax_check2", validate_translator_code)
-    graph.add_node("clear_executer_memory", clear_executer_memory)
 
     graph.add_edge(START, "detect_language")
 
@@ -48,6 +47,7 @@ def build_graph():
         {
             "fix": "Translate to Python",
             "proceed": "analyzer"
+            'end': END,
         }
     )
 
@@ -94,5 +94,7 @@ def build_graph():
             "end": END,
         }
     )
+
+    graph.add_edge("Translate from Python", END)
 
     return graph.compile()

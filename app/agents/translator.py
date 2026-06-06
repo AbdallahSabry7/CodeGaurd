@@ -36,15 +36,15 @@ def translate_to_python(state: AgentState) -> AgentState:
     lang = state.get("source_language", "")
     error = state.get("translator_syntax_error")
     if lang == "python":
-        return {"original_code_coverted": state.get("original_code", "")}
+        return {"original_code_converted": state.get("original_code", "")}
     if lang not in _INTO_PYTHON:
         raise ValueError(f"Unsupported source language: {lang}")
-    base = state.get("original_code_coverted") if error else state.get("original_code", "")
+    base = state.get("original_code_converted") if error else state.get("original_code", "")
     prompt = SYNTAX_ERROR_PROMPT if error else _INTO_PYTHON[lang]
     code, response = _run_translator(base, prompt, error)
     return {
         "messages": [response],
-        "original_code_coverted": code,
+        "original_code_converted": code,
         "translator_syntax_error": None,
     }
 
@@ -62,6 +62,6 @@ def translate_from_python(state: AgentState) -> AgentState:
     return {
         "messages": [response],
         "refactored_code": code,
-        "translated_code": code,
+        "translator_code": code,
         "translator_syntax_error": None,
     }
