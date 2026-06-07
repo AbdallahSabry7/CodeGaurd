@@ -47,6 +47,25 @@ DISPATCH_PREFIXES = {
 # Tight, intentional set for true type-routing method detection.
 _ROUTING_PREFIXES = {"pay", "parse", "export", "import", "render", "convert", "serialize"}
 
+# FIX: methods sharing a type-ish *suffix* (debit_type/credit_type) are routing too.
+_ROUTING_SUFFIXES = {"type", "payment", "kind", "handler", "strategy"}
+
+# FIX: tokenized discriminator roots so attribute/param names like
+# `type_of_employee`, `payment_type`, `user_status`, `_log_type` register as
+# type-dispatch keys (not just exact matches in TYPE_DISPATCH_NAMES).
+DISPATCH_ROOTS = {
+    "type", "kind", "status", "state", "category",
+    "role", "mode", "variant", "subtype", "payment",
+}
+
+
+def _is_dispatch_token(tok: str) -> bool:
+    """True if a name/attribute token looks like a type/kind discriminator."""
+    tok = (tok or "").lower()
+    if tok in TYPE_DISPATCH_NAMES:
+        return True
+    return any(part in DISPATCH_ROOTS for part in tok.split("_"))
+
 
 def _attr_chain(node: ast.expr) -> str:
     """Flatten an Attribute/Name access chain into a dotted string."""
@@ -141,10 +160,15 @@ class OCPDetector(ast.NodeVisitor):
         has_enum_like = False
         has_dispatch_var = False
         for part in parts:
-            if isinstance(part, ast.Attribute) and isinstance(part.value, ast.Name):
-                if part.value.id and part.value.id[0].isupper() and part.value.id not in BUILTIN_TYPES:
-                    has_enum_like = True
-            elif isinstance(part, ast.Name) and (part.id in TYPE_DISPATCH_NAMES or self._is_type_var(part.id.lower())):
+            if (isinstance(part, ast.Attribute) and isinstance(part.value, ast.Name)
+                    and part.value.id and part.value.id[0].isupper()
+                    and part.value.id not in BUILTIN_TYPES):
+                has_enum_like = True
+            # FIX: an attribute discriminator (self._log_type == LoggerType.X) is a
+            # dispatch var too, not only bare Names.
+            elif isinstance(part, ast.Attribute) and _is_dispatch_token(part.attr):
+                has_dispatch_var = True
+            elif isinstance(part, ast.Name) and (_is_dispatch_token(part.id) or self._is_type_var(part.id.lower())):
                 has_dispatch_var = True
         if has_enum_like and has_dispatch_var:
             self._report(node, "Enum Dispatch", "medium",
@@ -160,14 +184,17 @@ class OCPDetector(ast.NodeVisitor):
             for val in test.values:
                 if isinstance(val, ast.Compare):
                     names = _extract_compare_names(val)
-                    if any(n in TYPE_DISPATCH_NAMES or self._is_type_var(n) for n in names):
+                    if any(_is_dispatch_token(n) or self._is_type_var(n) for n in names):
                         self._report(node, "IF Name Dispatch (BoolOp)", "high",
                                      "Boolean chain of type-name comparisons \u2014 type-based dispatch")
                         return True
         if not isinstance(test, ast.Compare):
             return False
+        # FIX: membership / identity tests (x in y, x is None) are guards, not dispatch.
+        if any(isinstance(op, (ast.In, ast.NotIn, ast.Is, ast.IsNot)) for op in test.ops):
+            return False
         names = _extract_compare_names(test)
-        hit = next((n for n in names if n in TYPE_DISPATCH_NAMES), None)
+        hit = next((n for n in names if _is_dispatch_token(n)), None)
         if hit is not None:
             self._report(node, "IF Name Dispatch", "high",
                          f"Condition branches on '{hit}' \u2014 suggests type-based dispatch")
@@ -318,12 +345,20 @@ class OCPDetector(ast.NodeVisitor):
         test = _unwrap_not(node.test)
         if not isinstance(test, ast.Compare):
             return False
+        prop_words = {"properties", "data", "attributes", "config", "meta", "info"}
         for part in [test.left] + list(test.comparators):
-            if isinstance(part, ast.Subscript) and isinstance(part.value, ast.Attribute):
-                attr_name = part.value.attr.lower()
-                if attr_name in {"properties", "data", "attributes", "config", "meta", "info"}:
+            if isinstance(part, ast.Subscript):
+                # FIX: also handle a method call before the subscript, e.g.
+                # obj.get_properties()['Color'] == 'Red'.
+                base = part.value
+                attr_name = None
+                if isinstance(base, ast.Attribute):
+                    attr_name = base.attr.lower()
+                elif isinstance(base, ast.Call) and isinstance(base.func, ast.Attribute):
+                    attr_name = base.func.attr.lower()
+                if attr_name and any(w in attr_name for w in prop_words):
                     self._report(node, "Property Inspection (Tell, Don't Ask)", "high",
-                                 f"Inspecting '{part.value.attr}' externally to make decisions. "
+                                 "Inspecting object properties externally to make decisions. "
                                  "Push this logic inside the class as a method.")
                     return True
         return False
@@ -365,9 +400,12 @@ class OCPDetector(ast.NodeVisitor):
                 if is_abstract:
                     continue
                 parts = item.name.split("_")
+                args = tuple(arg.arg for arg in item.args.args)
                 if len(parts) > 1 and parts[0].lower() in _ROUTING_PREFIXES:
-                    args = tuple(arg.arg for arg in item.args.args)
                     method_signatures.setdefault((parts[0].lower(), args), []).append(item.name)
+                # FIX: also bucket by routing *suffix* (debit_type/credit_type).
+                if len(parts) > 1 and parts[-1].lower() in _ROUTING_SUFFIXES:
+                    method_signatures.setdefault(("suffix:" + parts[-1].lower(), args), []).append(item.name)
         flagged = False
         for (prefix, _args), names in method_signatures.items():
             if len(names) >= 2:
@@ -586,16 +624,13 @@ def get_ocp_report(code_str: str) -> dict:
         tree = ast.parse(code_str)
     except SyntaxError as e:
         return {"status": "Error", "reason": f"Syntax error: {e}", "violations": []}
-
     try:
         detector = OCPDetector()
         detector.visit(tree)
     except Exception as e:
         return {"status": "Error", "reason": f"Analyzer error: {type(e).__name__}: {e}", "violations": []}
-
     if not detector.violations:
         return {"status": "Pass", "reason": "No type-based dispatching detected.", "violations": []}
-
     high = [v for v in detector.violations if v["severity"] == "high"]
     top = high[0] if high else detector.violations[0]
     location = f"line {top['line']}"

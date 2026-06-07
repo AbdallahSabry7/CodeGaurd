@@ -21,10 +21,13 @@ from __future__ import annotations
 
 import ast
 import os
+#from platform import node
 import warnings
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from typing import NamedTuple
+
+#from numpy import typename
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -52,6 +55,13 @@ _BUILTIN_TYPES: frozenset[str] = frozenset({
     "KeyError", "IndexError", "RuntimeError", "StopIteration",
     "OSError", "IOError", "NotImplementedError", "AttributeError",
     "ImportError", "NameError", "PermissionError", "FileNotFoundError",
+    "datetime", "date", "time", "timedelta", "timezone",
+    "Decimal", "Fraction", "Number",
+    "Path", "PurePath", "PosixPath", "WindowsPath",
+    "UUID",
+    "Enum", "IntEnum", "StrEnum", "Flag", "IntFlag",
+    "Logger", "Lock", "RLock", "Event", "Thread", "Queue",
+    "Counter", "defaultdict", "OrderedDict", "deque", "namedtuple",
 })
 
 # Naming heuristics for classes we cannot resolve from the local AST.
@@ -63,7 +73,7 @@ _ABSTRACT_SUFFIXES: tuple[str, ...] = (
     # DDD / hexagonal architecture conventions — only unambiguous abstract nouns.
     # "Store", "Service", "Handler" etc. are deliberately omitted: they are
     # equally common as concrete class names (e.g. SqliteStore, FileHandler).
-    "Repository", "Gateway", "Port", "Resolver",
+    # "Repository", "Gateway", "Port", "Resolver",
 )
 
 # Transparent generic wrappers — drill into their type argument(s)
@@ -253,12 +263,36 @@ def _raises_not_implemented(node: ast.FunctionDef | ast.AsyncFunctionDef) -> boo
 # ---------------------------------------------------------------------------
 # Class registry builder
 # ---------------------------------------------------------------------------
+def _is_value_type_class(node: ast.ClassDef) -> bool:
+    """Detect value objects (dataclasses, enums, exceptions, NamedTuples).
+    Instantiating these is not a DIP violation."""
+    for d in node.decorator_list:
+        if isinstance(d, ast.Name) and d.id == "dataclass":
+            return True
+        if isinstance(d, ast.Attribute) and d.attr == "dataclass":
+            return True
+        if isinstance(d, ast.Call):
+            fn = d.func
+            if isinstance(fn, ast.Name) and fn.id == "dataclass":
+                return True
+            if isinstance(fn, ast.Attribute) and fn.attr == "dataclass":
+                return True
+    for b in node.bases:
+        bname = b.id if isinstance(b, ast.Name) else (b.attr if isinstance(b, ast.Attribute) else "")
+        if bname in ("Enum", "IntEnum", "StrEnum", "Flag", "IntFlag", "NamedTuple"):
+            return True
+        if bname.endswith("Error") or bname.endswith("Exception"):
+            return True
+    if node.name.endswith("Error") or node.name.endswith("Exception"):
+        return True
+    return False
 
 @dataclass
 class ClassRegistry:
     """Tracks which class names are abstract vs concrete within one module."""
     abstract: set[str] = field(default_factory=set)
     concrete: set[str] = field(default_factory=set)
+    value_types: set[str] = field(default_factory=set)
 
     def classify(self, name: str) -> str:
         """Return 'abstract', 'concrete', or 'unknown'."""
@@ -323,6 +357,8 @@ def _build_class_registry(tree: ast.Module) -> ClassRegistry:
             registry.abstract.add(node.name)
         else:
             registry.concrete.add(node.name)
+        if _is_value_type_class(node):           
+            registry.value_types.add(node.name)
 
     return registry
 
@@ -545,6 +581,47 @@ class DipAnalyzer(ast.NodeVisitor):
     # ------------------------------------------------------------------
 
     def visit_AnnAssign(self, node: ast.AnnAssign) -> None:
+        # also catch instance attributes declared inside methods,
+        # e.g. `self.client: PostgresClient = client` inside __init__.
+        if self.current_class is not None:
+            target = node.target
+            is_class_level = not self._in_method
+            is_self_attr = (
+                self._in_method
+                and isinstance(target, ast.Attribute)
+                and isinstance(target.value, ast.Name)
+                and target.value.id == "self"
+            )
+            if is_class_level or is_self_attr:
+                self._check_annotation(
+                    node.annotation, "DIP004", node.lineno, node.col_offset,
+                    f"Class '{self.current_class}' has an attribute "
+                    f"annotated with a concrete class.",
+                )
+        self.generic_visit(node)
+    
+    """def visit_AnnAssign(self, node: ast.AnnAssign) -> None:
+    # also catch instance attributes declared inside methods,
+    # e.g. `self.client: PostgresClient = client` inside __init__.
+        if self.current_class is not None:
+            target = node.target
+            is_class_level = not self._in_method
+            is_self_attr = (
+                self._in_method
+                and isinstance(target, ast.Attribute)
+                and isinstance(target.value, ast.Name)
+                and target.value.id == "self"
+        )
+        if is_class_level or is_self_attr:
+            self._check_annotation(
+                node.annotation, "DIP004", node.lineno, node.col_offset,
+                f"Class '{self.current_class}' has an attribute "
+                f"annotated with concrete class '{typename}'.",
+            )
+        self.generic_visit(node)"""
+    
+    """
+    def visit_AnnAssign(self, node: ast.AnnAssign) -> None:
         if self.current_class is not None and not self._in_method:
             self._check_annotation(
                 node.annotation, "DIP004", node.lineno, node.col_offset,
@@ -552,6 +629,7 @@ class DipAnalyzer(ast.NodeVisitor):
                 f"annotated with concrete class '{{typename}}'.",
             )
         self.generic_visit(node)
+    """
 
     # ------------------------------------------------------------------
     # Direct instantiation
@@ -565,6 +643,7 @@ class DipAnalyzer(ast.NodeVisitor):
                 typename
                 and typename not in ("super", self.current_class)
                 and typename not in _BUILTIN_TYPES
+                and typename not in self.registry.value_types
                 and self._is_concrete(typename)
             ):
                 if self._current_method:
