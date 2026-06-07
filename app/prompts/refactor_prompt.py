@@ -86,3 +86,19 @@ REFACTOR_SYNTAX_PROMPT = _refactor_prompt(
         "- Do not re-architect or add changes beyond fixing the error",
     ),
 )
+
+REFACTOR_BEHAVIOR_PROMPT = """Your previous refactor CHANGED the program's behavior.
+Below is a black-box equivalence report: inputs where the refactored code produced a
+different result than the original.
+
+Fix the refactored code so it reproduces the ORIGINAL behavior on these inputs, while
+KEEPING your structural/quality improvements. Do NOT rename public (module-level,
+non-underscore) functions - they are the program's contract. Return the full corrected
+code only.
+
+Equivalence report:
+{behavior_diff}
+
+Current refactored code:
+{refactored_code}
+"""

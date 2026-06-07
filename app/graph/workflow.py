@@ -3,10 +3,10 @@ from langgraph.graph import StateGraph, START, END
 import ast
 
 from schemas import AgentState
-from agents import refactor_agent, translate_from_python , translate_to_python , architect_agent
+from agents import refactor_agent, translate_from_python , translate_to_python , architect_agent , characterize_node
 from tools import analysis_tool, execute_code_tool
-from .routers import analyzer_router, syntax_check_router, executer_router, main_router , translator_router , syntax_check_router2 , route_after_architect , convergence_router
-from .nodes import validate_refactored_code,validate_translator_code , analyzer_function, executer_function, detect_language , convergence_node
+from .routers import analyzer_router, syntax_check_router, executer_router, main_router , translator_router , syntax_check_router2 , route_after_architect , convergence_router , equivalence_router
+from .nodes import validate_refactored_code,validate_translator_code , analyzer_function, executer_function, detect_language , convergence_node , equivalence_node
 
 def build_graph():
     graph = StateGraph(AgentState)
@@ -20,6 +20,8 @@ def build_graph():
     graph.add_node("Translate from Python", translate_from_python)
     graph.add_node("syntax_check", validate_refactored_code)
     graph.add_node("syntax_check2", validate_translator_code)
+    graph.add_node("characterize", characterize_node)
+    graph.add_node("equivalence", equivalence_node)
 
     graph.add_edge(START, "detect_language")
 
@@ -28,7 +30,7 @@ def build_graph():
         main_router,
         {
             "end": END,
-            "analyzer": "analyzer",
+            "characterize": "characterize",
             "translator": "Translate to Python"
         }
     )
@@ -36,7 +38,7 @@ def build_graph():
         "Translate to Python",
         translator_router,
         {
-            "analyzer": "syntax_check2",
+            "characterize": "syntax_check2",
             "end": END,
         }
     )
@@ -46,10 +48,12 @@ def build_graph():
         syntax_check_router2,
         {
             "fix": "Translate to Python",
-            "proceed": "analyzer",
+            "proceed": "characterize",
             'end': END
         }
     )
+
+    graph.add_edge("characterize", "analyzer")
 
     graph.add_edge("analyzer", "architect")
 
@@ -89,10 +93,21 @@ def build_graph():
         executer_router,
         {
             "refactor": "Refactor Agent",
-            "translator": "Translate from Python",
+            "equivalence": "equivalence",
             "end": END,
         }
     )
+
+    graph.add_conditional_edges(
+        "equivalence",
+        equivalence_router,
+        {
+            "refactor": "Refactor Agent",  
+            "translate_out": "Translate from Python", 
+            "done": END,                   
+        },
+    )
+
 
     graph.add_edge("Translate from Python", END)
 

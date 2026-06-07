@@ -4,6 +4,8 @@ from schemas import AgentState
 from tools import analysis_tool, execute_code_tool , score_report, ConvergenceController
 import re
 
+from tools import GoldenMaster, replay
+
 def validate_translator_code(state: AgentState) -> dict:
     iterations = state.get("refactor_iterations", 0)
     if iterations == 0:
@@ -179,3 +181,14 @@ def convergence_node(state: AgentState) -> dict:
     history = list(state.get("quality_scores", []))
     history.append(latest)
     return {"quality_scores": history}
+
+def equivalence_node(state):
+    """Deterministic: replay the golden master against the latest refactor."""
+    gm_json = state.get("golden_master")
+    if not gm_json:
+        return {"behavior_diff": None, "equivalence_report": "skipped - no golden master"}
+    result = replay(state["refactored_code"], GoldenMaster.from_json(gm_json))
+    return {
+        "behavior_diff": None if result.preserved else result.report,
+        "equivalence_report": result.report,
+    }

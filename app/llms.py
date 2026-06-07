@@ -22,7 +22,7 @@ refactor_llm = ChatOpenAI(
     },
 )
 
-comparator_llm = ChatGroq(
+characterize_llm = ChatGroq(
     model= settings.model2,
     api_key=settings.GROQ_API_KEY,
     temperature=0.1,
@@ -38,3 +38,5 @@ architect_llm = ChatOpenAI(
         "X-Title": "CodeGuard",
     },
 )
+
+

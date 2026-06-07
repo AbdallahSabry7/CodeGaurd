@@ -40,30 +40,26 @@ def executer_router(state: AgentState) -> str:
     source_language = state.get("source_language")
 
     if iterations >= max_iterations:
-        if source_language != "python":
-            return "translator"
         return "end"
 
     if "FAIL" in result:
         return "refactor"
     
-    if source_language != "python":
-        return "translator"
-    return "end"
+    return "equivalence"
 
 def main_router(state: AgentState) -> str:
     source_language = state.get("source_language", "unsupported")
     if source_language == "unsupported" or source_language == "unknown":
         return "end"
     elif source_language == "python":
-        return "analyzer"
+        return "characterize"
     else:
         return "translator"
     
 def translator_router(state: AgentState) -> str:
     iterations = state.get("refactor_iterations", 0)
     if iterations == 0:
-        return "analyzer"
+        return "characterize"
     else:   
         return "end"
     
@@ -77,3 +73,11 @@ def convergence_router(state: AgentState) -> str:
         history=state.get("quality_scores", []),
         loops=state.get("improvement_loops", 0),
     )
+
+def equivalence_router(state) -> str:
+    # behavior changed AND repair budget left -> send back to Refactor with evidence
+    if state.get("behavior_diff") and state.get("refactor_iterations", 0) < settings.max_iterations:
+        return "refactor"
+    # preserved (or unverified -> flagged, never blocks): proceed to the exit
+    lang = (state.get("language") or state.get("source_language") or "python").lower()
+    return "translate_out" if lang in ("java", "cpp") else "done"

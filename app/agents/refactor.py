@@ -1,16 +1,18 @@
 import re
-
 from langchain_core.messages import SystemMessage, HumanMessage
-
 from schemas import AgentState
-from prompts import REFACTOR_SYSTEM_PROMPT, REFACTOR_SYNTAX_PROMPT
+from prompts import (
+    REFACTOR_SYSTEM_PROMPT,
+    REFACTOR_SYNTAX_PROMPT,
+    REFACTOR_BEHAVIOR_PROMPT,
+)
 from llms import refactor_llm
 
 
 def _format_directives(directives: list[dict]) -> str:
     """Render the architect's vetted directives as a numbered, prioritized list."""
     if not directives:
-        return "No actionable directives — return the code unchanged."
+        return "No actionable directives - return the code unchanged."
     lines = []
     for d in directives:
         lines.append(
@@ -23,7 +25,7 @@ def _format_directives(directives: list[dict]) -> str:
 def refactor_agent(state: AgentState) -> dict:
     syntax_error = state.get("refactor_syntax_error")
     execution_result = state.get("execution_result") or ""
-
+    behavior_diff = state.get("behavior_diff")
     code = state.get("refactored_code") or state["original_code"]
 
     if syntax_error:
@@ -32,6 +34,9 @@ def refactor_agent(state: AgentState) -> dict:
     elif "FAIL" in execution_result:
         report = execution_result
         prompt = REFACTOR_SYNTAX_PROMPT
+    elif behavior_diff:                      
+        report = behavior_diff
+        prompt = REFACTOR_BEHAVIOR_PROMPT
     else:
         report = _format_directives(state.get("refactor_directives") or [])
         prompt = REFACTOR_SYSTEM_PROMPT
@@ -54,5 +59,6 @@ def refactor_agent(state: AgentState) -> dict:
         "messages": [response],
         "refactored_code": clean_code,
         "refactor_syntax_error": None,
+        "behavior_diff": None,               
         "refactor_iterations": state.get("refactor_iterations", 0) + 1,
     }
