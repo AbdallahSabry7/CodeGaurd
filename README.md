@@ -1,10 +1,3 @@
-<aside>
-🐋
-
-This is the complete, up-to-date `README.md` for the repo, rendered below so the diagram, code blocks, and table display correctly. Copy it into your repo's `README.md`.
-
-</aside>
-
 # 🛡️ CodeGuard
 
 > Multi-agent Python code analysis and automated refactoring powered by LangGraph — with black-box behavioral-equivalence verification.
@@ -16,7 +9,7 @@ CodeGuard is an agentic pipeline that takes raw code, detects its language, anal
 
 ## Architecture
 
-CodeGuard is built on **LangGraph**. The pipeline is composed of **four LLM agents**, one **LLM-assisted Characterizer**, and several deterministic plain-function nodes wired together as a directed graph with conditional edges and a hard cap of `max_iterations` (default 3) refactor loops.
+CodeGuard is built on **LangGraph**. The pipeline combines **three core LLM agents** (Translator, Architect, Refactor), one **LLM-assisted Characterizer**, and several **deterministic plain-function nodes** — including a **Convergence controller** (which replaced the old LLM comparator) and an **Equivalence gate** — wired together as a directed graph with conditional edges and a hard cap of `max_iterations` (default 3) refactor loops.
 
 ```mermaid
 flowchart TD
@@ -29,14 +22,14 @@ flowchart TD
     SynT -->|proceed| Char
     Char --> Analyze["Analyzer (analysis_tool)"]
     Analyze --> Arch["Architect Agent (LLM)"]
-    Arch -->|HALT_PERFECT_ENOUGH| Fin
-    Arch -->|directives| Refactor["Refactor Agent (LLM)"]
-    Arch -->|re-entry| Compare["Comparator Agent (LLM)"]
+    Arch -->|HALT_PERFECT_ENOUGH| End2([END])
+    Arch -->|"first pass: directives"| Refactor["Refactor Agent (LLM)"]
+    Arch -->|"re-entry"| Conv["Convergence Node (plain fn)"]
     Refactor --> Syn["Syntax Check (ast.parse)"]
     Syn -->|fix| Refactor
     Syn -->|proceed| Analyze
-    Compare -->|FAIL| Refactor
-    Compare -->|PASS| Exec["Executor (Docker sandbox)"]
+    Conv -->|continue| Refactor
+    Conv -->|finalize| Exec["Executor (Docker sandbox)"]
     Exec -->|FAIL| Refactor
     Exec -->|PASS| Equiv["Equivalence Gate (replay Golden Master)"]
     Equiv -->|behavior changed| Refactor
@@ -46,27 +39,28 @@ flowchart TD
     FromPy --> End4([END])
 ```
 
-### LLM agents (four) + Characterizer
+### LLM agents + Characterizer
 
-- **Translator Agent** — converts Java/C++ → Python before analysis, and Python → the original language after refactoring. Runs only for non-Python input.
-- **Architect Agent** — runs after every analyzer pass. Consumes the raw analyzer report, validates its output against a Pydantic schema (with retries), classifies findings (SOLID / Clean Code / Complexity) with severity + confidence, and emits a numbered, severity-sorted list of refactor directives. The global verdict is recomputed in code, never trusted from the model.
-- **Refactor Agent** — rewrites code to satisfy the Architect's directives on the first pass, and on re-entry fixes only what the Syntax Check, Comparator, Executor, or **Equivalence Gate** flagged (in that priority order).
-- **Comparator Agent** — diffs the baseline Architect report against the latest one and returns PASS / FAIL.
-- **Characterizer (LLM-assisted)** — runs once at ingestion. Reads the Python original, decides the behavioral boundary (`stdio` vs `api`), and designs a coverage-minded input suite. The LLM only picks the inputs; capturing and comparing observations is deterministic.
+- **Translator Agent** — converts Java/C++ → Python before analysis, and Python → the original language after refactoring. Runs only for non-Python input. (`model3`, Groq, temp 0.2)
+- **Architect Agent** — runs after every analyzer pass. Consumes the raw analyzer report, validates its output against a Pydantic schema (with retries), classifies findings (SOLID / Clean Code / Complexity) with severity + confidence, and emits a numbered, severity-sorted list of refactor directives. The global verdict is recomputed in code, never trusted from the model. (`model4`, OpenRouter, temp 0.2)
+- **Refactor Agent** — rewrites code to satisfy the Architect's directives on the first pass, and on re-entry fixes only what the Syntax Check, Executor, or **Equivalence Gate** flagged (in that priority order). (`model1`, OpenRouter, temp 0.2)
+- **Characterizer (LLM-assisted)** — runs once at ingestion. Reads the Python original, decides the behavioral boundary (`stdio` vs `api`), and designs a coverage-minded input suite. The LLM only picks the inputs; capturing and comparing observations is deterministic. (`model2`, Groq, temp 0.1)
 
 ### Plain-function nodes (no LLM)
 
 - **Detect Language** — regex scoring with positive/negative signals to pick Python / Java / C++ or mark input unsupported.
 - **Analyzer** — calls `analysis_tool` directly. The first run is captured as the baseline report.
 - **Syntax Check** — `ast.parse()` on refactored (and separately on translated) code; loops back on failure.
+- **Convergence Node** — scores each Architect report into a single weighted number and decides whether to keep refactoring or finalize. Replaces the old LLM comparator. (details below)
 - **Executor** — calls `execute_code_tool` to run the code in a Docker container.
 - **Equivalence Gate (Golden Master)** — replays the captured input suite against the refactored code and compares observations. `changed` → back to Refactor with the failing inputs as evidence; `preserved` / `unverified` → proceed (only a true `changed` verdict blocks).
 
 ### Tools & services
 
-- `analysis_tool` — single merged tool: time & space complexity, SOLID violations (SRP / OCP / LSP / ISP / DIP), and a clean-code index.
-- `execute_code_tool` — runs code in a Docker container, auto-installing third-party imports via pip before execution.
-- `services/golden_master.py` — deterministic capture / replay / compare engine for behavioral equivalence.
+- `tools/analysis_tool.py` — single merged tool: time & space complexity, SOLID violations (SRP / OCP / LSP / ISP / DIP), and a clean-code index.
+- `tools/execute_code_tool.py` — runs code in a Docker container, auto-installing third-party imports via pip before execution.
+- `tools/convergence.py` — deterministic quality scoring: `score_report`, `compare_reports`, and the `ConvergenceController` stop logic.
+- `tools/golden_master.py` — deterministic capture / replay / compare engine for behavioral equivalence.
 
 ## Behavioral Equivalence (Golden Master)
 
@@ -80,7 +74,16 @@ Two boundaries, one rule:
 - **stdio** — programs that read stdin / print: compare stdout + exception kind on identical input.
 - **api** — libraries: an LLM-written driver reads JSON args from stdin and calls the **public** functions; public names stay stable while internals churn freely.
 
-If the original can't be run or no cases can be generated, the result is **unverified** — flagged for visibility but **never blocking** and never counted as a pass. Only a genuine `changed` verdict sends the code back to the Refactor agent. Equivalence answers only *"same behavior?"*; *"better?"* stays with the Comparator/quality loop.
+If the original can't be run or no cases can be generated, the result is **unverified** — flagged for visibility but **never blocking** and never counted as a pass. Only a genuine `changed` verdict sends the code back to the Refactor agent. Equivalence answers only *"same behavior?"*; *"better?"* is decided by the deterministic convergence loop below.
+
+## Quality Convergence (deterministic)
+
+Instead of asking an LLM *"is this better?"*, CodeGuard scores quality deterministically. After each refactor pass the Analyzer and Architect re-evaluate the code; the **Convergence Node** then turns the latest Architect report into a single weighted score (severity- and complexity-weighted — lower is better, `0` = clean) and appends it to a history. The `ConvergenceController` then decides:
+
+- **continue** → send the code back to the Refactor agent for another pass, or
+- **finalize** → stop and hand off to the Executor, when the score reaches `0`, the per-pass gain drops below `min_gain` (default 0.05), or the loop hits `max_improvement_loops` (default 3).
+
+This replaces the old LLM Comparator with a reproducible, explainable stop condition.
 
 ## Models
 
@@ -88,12 +91,12 @@ If the original can't be run or no cases can be generated, the result is **unver
 | --- | --- | --- | --- | --- |
 | Detect Language | Plain fn | — | — | — |
 | Translator | LLM | `model3` (llama-3.3-70b-versatile) | Groq | 0.2 |
-| Characterizer | LLM-assisted | `model3` (llama-3.3-70b-versatile) | Groq | 0 |
+| Characterizer | LLM-assisted | `model2` (llama-4-scout-17b-16e-instruct) | Groq | 0.1 |
 | Analyzer | Plain fn | — | — | — |
-| Architect | LLM | llama-4-scout-17b-16e-instruct | Groq | 0 |
+| Architect | LLM | `model4` (set in .env) | OpenRouter | 0.2 |
 | Refactor | LLM | `model1` (openrouter/owl-alpha) | OpenRouter | 0.2 |
 | Syntax Check | Plain fn | — | — | — |
-| Comparator | LLM | `model2` (llama-4-scout-17b-16e-instruct) | Groq | 0.1 |
+| Convergence Node | Plain fn | — | — | — |
 | Executor | Plain fn | — | — | — |
 | Equivalence Gate | Plain fn | — | — | — |
 
@@ -103,38 +106,37 @@ If the original can't be run or no cases can be generated, the result is **unver
 CodeGuard/
 ├── app/
 │   ├── agents/
-│   │   ├── architect.py        # Architect Agent (LLM)
-│   │   ├── characterizer.py    # Characterizer - builds the golden master (LLM-assisted)
-│   │   ├── comparator.py       # Comparator Agent (LLM)
-│   │   ├── refactor.py         # Refactor Agent (LLM)
-│   │   └── translator.py       # Translator Agent (LLM)
+│   │   ├── architect.py         # Architect Agent (LLM, OpenRouter)
+│   │   ├── characterizer.py     # Characterizer - builds the golden master (LLM-assisted, Groq)
+│   │   ├── refactor.py          # Refactor Agent (LLM, OpenRouter)
+│   │   └── translator.py        # Translator Agent (LLM, Groq)
 │   ├── graph/
-│   │   ├── __init__.py         # exposes build_graph
-│   │   ├── nodes.py            # plain-function nodes + equivalence_node
-│   │   ├── routers.py          # conditional-edge routing + equivalence_router
-│   │   └── workflow.py         # StateGraph wiring (build_graph)
+│   │   ├── __init__.py          # exposes build_graph
+│   │   ├── nodes.py             # plain-function nodes + convergence_node + equivalence_node
+│   │   ├── routers.py           # conditional-edge routing (+ convergence_router, equivalence_router)
+│   │   └── workflow.py          # StateGraph wiring (build_graph)
 │   ├── helpers/
-│   │   └── config.py           # pydantic-settings
+│   │   └── config.py            # pydantic-settings
 │   ├── prompts/
 │   │   ├── architect_prompt.py
 │   │   ├── characterize_prompt.py
-│   │   ├── comparator_prompt.py
 │   │   ├── refactor_prompt.py
 │   │   └── translator_prompt.py
 │   ├── schemas/
-│   │   └── state.py            # AgentState TypedDict (+ golden_master, behavior_diff, equivalence_report)
+│   │   └── state.py             # AgentState TypedDict (+ quality_scores, golden_master, behavior_diff, equivalence_report)
 │   ├── services/
-│   │   ├── golden_master.py    # capture / replay / compare engine
 │   │   ├── complexity.py
 │   │   ├── clean_code.py
-│   │   ├── executer.py         # Docker sandbox runner
-│   │   └── tests/              # calibration + test_golden_master.py
+│   │   ├── executer.py          # Docker sandbox runner
+│   │   └── tests/               # calibration tests
 │   ├── tools/
 │   │   ├── analysis_tool.py
-│   │   └── execute_code_tool.py
-│   ├── app.py                  # Streamlit web UI
-│   ├── main.py                 # CLI entry point
-│   ├── llms.py                 # LLM instantiation (Groq + OpenRouter)
+│   │   ├── execute_code_tool.py
+│   │   ├── convergence.py       # score_report / compare_reports / ConvergenceController
+│   │   └── golden_master.py     # capture / replay / compare engine
+│   ├── app.py                   # Streamlit web UI
+│   ├── main.py                  # CLI entry point
+│   ├── llms.py                  # LLM instantiation (Groq + OpenRouter)
 │   ├── requirements.txt
 │   └── .env.example
 ├── LICENSE
@@ -180,12 +182,19 @@ LANGCHAIN_TRACING_V2=true
 LANGCHAIN_ENDPOINT=https://api.smith.langchain.com
 LANGCHAIN_PROJECT=CodeGuard
 
-model1=openrouter/owl-alpha
-model2=meta-llama/llama-4-scout-17b-16e-instruct
-model3=llama-3.3-70b-versatile
+# Groq models
+model2=meta-llama/llama-4-scout-17b-16e-instruct   # Characterizer
+model3=llama-3.3-70b-versatile                     # Translator
+
+# OpenRouter models
+model1=openrouter/owl-alpha                        # Refactor
+model4=                                            # Architect (required - set an OpenRouter model)
 openai_api_base=https://openrouter.ai/api/v1
 
+# Loop controls
 max_iterations=3
+max_improvement_loops=3
+min_gain=0.05
 ```
 
 ## Usage
