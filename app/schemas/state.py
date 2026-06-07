@@ -25,6 +25,8 @@ class AgentState(TypedDict):
     syntax_iterations:         int
     quality_scores:             list[float]
     improvement_loops:         int
-    golden_master: Optional[str]        
-    behavior_diff: Optional[str]        
-    equivalence_report: Optional[str]
+    test_inputs: Optional[list[dict]]    
+    test_mode: Optional[str]             
+    test_driver: Optional[str]            
+    regression_verdict: Optional[str]     
+    regression_report: Optional[str]

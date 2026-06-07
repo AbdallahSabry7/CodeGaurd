@@ -1,10 +1,9 @@
 import ast
 
 from schemas import AgentState
-from tools import analysis_tool, execute_code_tool , score_report, ConvergenceController
+from tools import analysis_tool, execute_code_tool , score_report, ConvergenceController , differential_check
 import re
 
-from tools import GoldenMaster, replay
 
 def validate_translator_code(state: AgentState) -> dict:
     iterations = state.get("refactor_iterations", 0)
@@ -182,14 +181,16 @@ def convergence_node(state: AgentState) -> dict:
     history.append(latest)
     return {"quality_scores": history}
 
-def equivalence_node(state):
-    gm_json = state.get("golden_master")
-    if not gm_json:
-        return {"behavior_diff": None, "equivalence_report": "skipped - no golden master"}
-
-    result = replay(state["refactored_code"], GoldenMaster.from_json(gm_json))
-    changed = result.status == "changed"       
+def regression_check_node(state: AgentState) -> dict:
+    original = state.get("original_code_converted") or state["original_code"]
+    result = differential_check(
+        original=original,
+        refactored=state["refactored_code"],
+        cases=state.get("test_inputs") or [],
+        mode=state.get("test_mode", "stdio"),
+        driver=state.get("test_driver", ""),
+    )
     return {
-        "behavior_diff": result.report if changed else None,   
-        "equivalence_report": result.report,                   
+        "regression_verdict": result.verdict,
+        "regression_report": result.report,
     }

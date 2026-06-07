@@ -11,18 +11,13 @@ translator_llm = ChatGroq(
     temperature=0.2,
 )
 
-refactor_llm = ChatOpenAI(
+refactor_llm = ChatGroq(
     model= settings.model1,
-    openai_api_key=settings.OPENROUTER_API_KEY,
-    openai_api_base=settings.openai_api_base,
-    temperature=0.2,
-    default_headers={
-        "HTTP-Referer": "http://localhost:3000",  # localhost is fine
-        "X-Title": "CodeGuard",
-    },
+    api_key=settings.GROQ_API_KEY,
+    temperature=0.1,
 )
 
-character_llm = ChatGroq(
+characterize_llm = ChatGroq(
     model= settings.model2,
     api_key=settings.GROQ_API_KEY,
     temperature=0.1,
@@ -34,7 +29,7 @@ architect_llm = ChatOpenAI(
     openai_api_base=settings.openai_api_base,
     temperature=0.2,
     default_headers={
-        "HTTP-Referer": "http://localhost:3000",  # localhost is fine
+        "HTTP-Referer": "http://localhost:3000", 
         "X-Title": "CodeGuard",
     },
 )
