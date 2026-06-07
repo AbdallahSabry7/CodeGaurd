@@ -2,6 +2,10 @@
 from __future__ import annotations
 from dataclasses import dataclass
 from typing import Literal
+from helpers.config import get_settings, Settings
+
+settings = get_settings()
+
 
 SEVERITY_WEIGHT = {"CRITICAL": 8.0, "HIGH": 4.0, "MEDIUM": 2.0, "LOW": 1.0}
 COMPLEXITY_WEIGHT = 4.0  
@@ -84,8 +88,8 @@ def compare_reports(baseline, latest, *, min_gain: float = 0.05,
 @dataclass
 class ConvergenceController:
     """Owns every stop decision for the improvement loop. No LLM. Fully testable."""
-    max_improvement_loops: int = 3
-    min_gain: float = 0.05
+    max_improvement_loops: int = settings.max_improvement_loops
+    min_gain: float = settings.min_gain
 
     def decide(self, *, history: list[float],
             loops: int) -> Literal["continue", "finalize"]:

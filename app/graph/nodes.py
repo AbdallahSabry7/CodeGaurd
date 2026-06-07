@@ -183,12 +183,13 @@ def convergence_node(state: AgentState) -> dict:
     return {"quality_scores": history}
 
 def equivalence_node(state):
-    """Deterministic: replay the golden master against the latest refactor."""
     gm_json = state.get("golden_master")
     if not gm_json:
         return {"behavior_diff": None, "equivalence_report": "skipped - no golden master"}
+
     result = replay(state["refactored_code"], GoldenMaster.from_json(gm_json))
+    changed = result.status == "changed"       
     return {
-        "behavior_diff": None if result.preserved else result.report,
-        "equivalence_report": result.report,
+        "behavior_diff": result.report if changed else None,   
+        "equivalence_report": result.report,                   
     }

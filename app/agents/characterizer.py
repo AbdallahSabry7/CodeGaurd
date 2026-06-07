@@ -5,16 +5,30 @@ from prompts.characterize_prompt import CHARACTERIZE_SYSTEM_PROMPT
 from tools import capture
 from llms import characterize_llm
 
+import re
+
 
 def _parse_spec(raw: str) -> dict:
-    raw = raw.strip()
-    if raw.startswith("~~~"):                      
-        raw = raw.strip("~")
-        raw = raw.split("\n", 1)[1] if "\n" in raw else raw
+    text = (raw or "").strip()
+
+    # 1) strip ``` / ```json / ~~~ fences if the model added them
+    fence = re.search(r"(?:```|~~~)(?:json)?\s*\n(.*?)(?:```|~~~)", text, re.DOTALL)
+    if fence:
+        text = fence.group(1).strip()
+
+    # 2) if there's leading/trailing prose, grab the first {...} block
+    if not text.startswith("{"):
+        brace = re.search(r"\{.*\}", text, re.DOTALL)
+        if brace:
+            text = brace.group(0)
+
     try:
-        spec = json.loads(raw)
+        spec = json.loads(text)
     except json.JSONDecodeError:
+        # surface it instead of silently disabling the gate
+        print(f"[characterizer] could not parse spec, got:\n{raw!r}")
         return {"mode": "stdio", "driver": "", "cases": []}
+
     spec.setdefault("mode", "stdio")
     spec.setdefault("driver", "")
     spec.setdefault("cases", [])

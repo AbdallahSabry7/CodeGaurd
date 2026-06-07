@@ -15,6 +15,9 @@ class Settings(BaseSettings):
     LANGCHAIN_PROJECT: str = "CodeGuard"
     model4: str = ""
     max_iterations: int = 3
+    max_improvement_loops: int = 3
+    min_gain: float = 0.05
+
     openai_api_base: str = "https://openrouter.ai/api/v1"
 
     model_config = SettingsConfigDict(env_file=".env")

@@ -22,7 +22,7 @@ refactor_llm = ChatOpenAI(
     },
 )
 
-characterize_llm = ChatGroq(
+character_llm = ChatGroq(
     model= settings.model2,
     api_key=settings.GROQ_API_KEY,
     temperature=0.1,

@@ -75,9 +75,7 @@ def convergence_router(state: AgentState) -> str:
     )
 
 def equivalence_router(state) -> str:
-    # behavior changed AND repair budget left -> send back to Refactor with evidence
     if state.get("behavior_diff") and state.get("refactor_iterations", 0) < settings.max_iterations:
         return "refactor"
-    # preserved (or unverified -> flagged, never blocks): proceed to the exit
     lang = (state.get("language") or state.get("source_language") or "python").lower()
     return "translate_out" if lang in ("java", "cpp") else "done"
