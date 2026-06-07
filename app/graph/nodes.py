@@ -1,7 +1,7 @@
 import ast
 
 from schemas import AgentState
-from tools import analysis_tool, execute_code_tool
+from tools import analysis_tool, execute_code_tool , score_report, ConvergenceController
 import re
 
 def validate_translator_code(state: AgentState) -> dict:
@@ -171,3 +171,11 @@ def detect_language(state: AgentState) -> dict:
             return {"source_language": "cpp", "destination_language": "python"}
     
 
+controller = ConvergenceController()   # inject via config for DIP
+
+def convergence_node(state: AgentState) -> dict:
+    """Deterministic: score the latest report, append to history. No LLM."""
+    latest = score_report(state["architect_report"]).total
+    history = list(state.get("quality_scores", []))
+    history.append(latest)
+    return {"quality_scores": history}

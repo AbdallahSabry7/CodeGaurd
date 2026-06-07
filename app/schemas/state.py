@@ -10,7 +10,6 @@ class AgentState(TypedDict):
     original_code_converted:   str
     translator_code:          Optional[str]
     refactored_code:          str
-    comparator_report:        str
     refactor_iterations:      int
     execution_result:         str
     refactor_syntax_error:    Optional[str]
@@ -24,3 +23,4 @@ class AgentState(TypedDict):
     architect_baseline_report: Optional[dict]
     architect_rejected:        Optional[list[dict]]
     syntax_iterations:         int
+    quality_scores:             list[float]

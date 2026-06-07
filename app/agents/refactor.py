@@ -3,11 +3,7 @@ import re
 from langchain_core.messages import SystemMessage, HumanMessage
 
 from schemas import AgentState
-from prompts import (
-    REFACTOR_SYSTEM_PROMPT,
-    REFACTOR_SYSTEM_PROMPT2,
-    REFACTOR_SYNTAX_PROMPT,
-)
+from prompts import REFACTOR_SYSTEM_PROMPT, REFACTOR_SYNTAX_PROMPT
 from llms import refactor_llm
 
 
@@ -24,29 +20,21 @@ def _format_directives(directives: list[dict]) -> str:
     return "\n".join(lines)
 
 
-def refactor_agent(state: AgentState) -> AgentState:
-    iterations = state.get("refactor_iterations", 0)
+def refactor_agent(state: AgentState) -> dict:
     syntax_error = state.get("refactor_syntax_error")
-    comparator_report = state.get("comparator_report") or ""
     execution_result = state.get("execution_result") or ""
 
-    if iterations == 0:
-        # First pass: apply the architect's vetted, prioritized directives.
-        code = state["original_code"]
+    code = state.get("refactored_code") or state["original_code"]
+
+    if syntax_error:
+        report = f"SyntaxError in your refactored code:\n{syntax_error}"
+        prompt = REFACTOR_SYNTAX_PROMPT
+    elif "FAIL" in execution_result:
+        report = execution_result
+        prompt = REFACTOR_SYNTAX_PROMPT
+    else:
         report = _format_directives(state.get("refactor_directives") or [])
         prompt = REFACTOR_SYSTEM_PROMPT
-    else:
-        # Re-entry: pick the prompt that matches WHY we were sent back.
-        code = state["refactored_code"]
-        if syntax_error:
-            report = f"SyntaxError in your refactored code:\n{syntax_error}"
-            prompt = REFACTOR_SYNTAX_PROMPT
-        elif "FAIL" in execution_result:
-            report = execution_result
-            prompt = REFACTOR_SYNTAX_PROMPT
-        else:
-            report = comparator_report
-            prompt = REFACTOR_SYSTEM_PROMPT2
 
     messages = [
         SystemMessage(content=prompt),
@@ -66,5 +54,5 @@ def refactor_agent(state: AgentState) -> AgentState:
         "messages": [response],
         "refactored_code": clean_code,
         "refactor_syntax_error": None,
-        "refactor_iterations": iterations + 1,
+        "refactor_iterations": state.get("refactor_iterations", 0) + 1,
     }

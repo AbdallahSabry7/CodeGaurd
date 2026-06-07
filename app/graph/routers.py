@@ -1,9 +1,11 @@
 from schemas import AgentState
 from helpers.config import get_settings, Settings
+from tools import ConvergenceController
 
 settings = get_settings()
 
 max_iterations = settings.max_iterations
+controller = ConvergenceController()
 
 def analyzer_router(state: AgentState) -> str:
     refactor_iterations = state.get("refactor_iterations", 0)
@@ -30,18 +32,6 @@ def syntax_check_router2(state: AgentState) -> str:
             return "fix"
         else:
             return "proceed"
-
-
-
-def comparator_router(state: AgentState) -> str:
-    report = state.get("comparator_report", "")
-    iterations = state.get("refactor_iterations", 0)
-
-    if iterations >= max_iterations:
-        return "end"
-    if "FAIL" in report:
-        return "refactor"
-    return "executer"
 
 
 def executer_router(state: AgentState) -> str:
@@ -80,4 +70,10 @@ def translator_router(state: AgentState) -> str:
 def route_after_architect(state):
     if state["architect_verdict"] == "HALT_PERFECT_ENOUGH":
         return 'END'
-    return "refactor" if not state.get("refactored_code") else "comparator"
+    return "refactor" if not state.get("refactored_code") else "convergence"
+
+def convergence_router(state: AgentState) -> str:
+    return controller.decide(
+        history=state.get("quality_scores", []),
+        loops=state.get("improvement_loops", 0),
+    )

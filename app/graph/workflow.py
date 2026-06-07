@@ -3,10 +3,10 @@ from langgraph.graph import StateGraph, START, END
 import ast
 
 from schemas import AgentState
-from agents import refactor_agent, comparator_agent , translate_from_python , translate_to_python , architect_agent
+from agents import refactor_agent, translate_from_python , translate_to_python , architect_agent
 from tools import analysis_tool, execute_code_tool
-from .routers import analyzer_router, syntax_check_router, comparator_router, executer_router, main_router , translator_router , syntax_check_router2 , route_after_architect
-from .nodes import validate_refactored_code,validate_translator_code , analyzer_function, executer_function, detect_language 
+from .routers import analyzer_router, syntax_check_router, executer_router, main_router , translator_router , syntax_check_router2 , route_after_architect , convergence_router
+from .nodes import validate_refactored_code,validate_translator_code , analyzer_function, executer_function, detect_language , convergence_node
 
 def build_graph():
     graph = StateGraph(AgentState)
@@ -15,7 +15,7 @@ def build_graph():
     graph.add_node("architect", architect_agent)
     graph.add_node("executer", executer_function)
     graph.add_node("Refactor Agent", refactor_agent)
-    graph.add_node("Comparator Agent", comparator_agent)
+    graph.add_node("Convergence Node", convergence_node)
     graph.add_node("Translate to Python", translate_to_python)
     graph.add_node("Translate from Python", translate_from_python)
     graph.add_node("syntax_check", validate_refactored_code)
@@ -59,7 +59,7 @@ def build_graph():
         {
             'END': END,
             "refactor": "Refactor Agent",
-            "comparator": "Comparator Agent",
+            "convergence": "Convergence Node",
         },
     )
 
@@ -76,12 +76,11 @@ def build_graph():
     )
 
     graph.add_conditional_edges(
-        "Comparator Agent",
-        comparator_router,
+        "Convergence Node",
+        convergence_router,
         {
-            "refactor": "Refactor Agent",
-            "executer": "executer",
-            "end": "Translate from Python",
+            "continue": "Refactor Agent",
+            "finalize": "executer"
         },
     )
 
