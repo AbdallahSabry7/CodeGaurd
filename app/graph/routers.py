@@ -75,6 +75,8 @@ def route_after_architect(state):
     return "refactor" if not state.get("refactored_code") else "convergence"
 
 def convergence_router(state: AgentState) -> str:
+    if state.get("refactor_iterations", 0) >= max_iterations:
+        return "finalize"
     return controller.decide(
         history=state.get("quality_scores", []),
         loops=state.get("improvement_loops", 0),

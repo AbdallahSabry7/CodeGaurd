@@ -7,15 +7,16 @@ import re
 
 def validate_translator_code(state: AgentState) -> dict:
     iterations = state.get("refactor_iterations", 0)
-    if iterations == 0:
-        code = state.get("original_code_converted", "")
-    else:
-        code = state.get("refactored_code")[-1] if state.get("refactored_code") else ""
+    code = (state.get("original_code_converted", "") if iterations == 0
+            else (state.get("refactored_code")[-1] if state.get("refactored_code") else ""))
     try:
         ast.parse(code)
         return {"translator_syntax_error": None}
     except SyntaxError as e:
-        return {"translator_syntax_error": f"SyntaxError at line {e.lineno}: {e.msg}"}
+        return {
+            "translator_syntax_error": f"SyntaxError at line {e.lineno}: {e.msg}",
+            "syntax_iterations": state.get("syntax_iterations", 0) + 1,   
+        }
 
 def validate_refactored_code(state: AgentState) -> dict:
     if state.get("refactored_code"):
@@ -192,11 +193,14 @@ def detect_language(state: AgentState) -> dict:
 controller = ConvergenceController()   # inject via config for DIP
 
 def convergence_node(state: AgentState) -> dict:
-    """Deterministic: score the latest report, append to history. No LLM."""
+    """Deterministic: score the latest report, append to history, count the loop."""
     latest = score_report(state["architect_report"]).total
     history = list(state.get("quality_scores", []))
     history.append(latest)
-    return {"quality_scores": history}
+    return {
+        "quality_scores": history,
+        "improvement_loops": state.get("improvement_loops", 0)
+    }
 
 def regression_check_node(state: AgentState) -> dict:
 	original = state.get("original_code_converted") or state["original_code"]
@@ -216,12 +220,9 @@ def regression_check_node(state: AgentState) -> dict:
 	}
 
 def destroy_last_node(state: AgentState) -> dict:
-    """Remove the last refactor from state, effectively undoing it."""
     if not state.get("refactored_code"):
-        return {} 
-    new_history = state["refactored_code"][:-1]
+        return {}
     return {
-        "refactored_code": new_history,
-        "refactor_iterations": max(state.get("refactor_iterations", 1) - 1, 0),
-        "quality_scores": state.get("quality_scores", [])[:-1],  
+        "refactored_code": state["refactored_code"][:-1],
+        "quality_scores": state.get("quality_scores", [])[:-1],
     }
