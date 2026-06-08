@@ -31,7 +31,8 @@ from dataclasses import fields
 
 import numpy as np
 import pandas as pd
-from sklearn.ensemble import HistGradientBoostingClassifier
+from sklearn.ensemble import  HistGradientBoostingClassifier
+from sklearn.ensemble import RandomForestClassifier
 from sklearn.model_selection import StratifiedKFold, cross_val_predict
 from sklearn.metrics import accuracy_score, classification_report, confusion_matrix
 import joblib
@@ -139,20 +140,6 @@ def make_model() -> HistGradientBoostingClassifier:
     )
 
 
-def cross_validate(X, y, n_splits: int = 5, seed: int = 42):
-    """Stratified CV; prints accuracy + HC-Score (matching your eval harness)."""
-    skf = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=seed)
-    y_pred = cross_val_predict(make_model(), X, y, cv=skf, n_jobs=-1)
-    print("CV accuracy      :", accuracy_score(y, y_pred))
-    print("CV HC-Score      :", hc_score(list(y), list(y_pred)))
-    print("CV HC-Score (w=2):", hc_score(list(y), list(y_pred), window=2))
-    print("CV HC-Score (w=1):", hc_score(list(y), list(y_pred), window=1))
-    print("\nClassification report:")
-    print(classification_report(y, y_pred))
-    print("Confusion matrix (rows=true, cols=pred, order = COMPLEXITY_ORDER):")
-    print(confusion_matrix(y, y_pred, labels=COMPLEXITY_ORDER))
-    return y_pred
-
 
 def train_and_save(X, y, path: str = "hybrid.joblib"):
     clf = make_model()
@@ -174,7 +161,7 @@ def feature_importance(clf, X, y, n_repeats: int = 5, top: int = 25):
     """Permutation importance (compute on a held-out split for honest numbers)."""
     from sklearn.inspection import permutation_importance
     r = permutation_importance(clf, X, y, n_repeats=n_repeats,
-                               random_state=0, n_jobs=-1)
+                                random_state=0, n_jobs=-1)
     order = np.argsort(r.importances_mean)[::-1]
     print("top features by permutation importance:")
     for i in order[:top]:

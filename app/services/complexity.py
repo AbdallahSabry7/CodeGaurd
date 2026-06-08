@@ -1,10 +1,11 @@
 from __future__ import annotations
+
 import ast
 import re
-import sys
 import textwrap
 from dataclasses import dataclass, field, fields
 from typing import Optional
+
 
 # ===========================================================================
 # Data structures
@@ -20,7 +21,7 @@ class DetectionSignals:
     # Recursion
     recursive_calls: int = 0
     recursive_branches: int = 0
-    recursion_in_loop: bool = False        # FIX 1: recursive call located inside a loop
+    recursion_in_loop: bool = False
     # Patterns
     halving_detected: bool = False
     sort_detected: bool = False
@@ -30,8 +31,16 @@ class DetectionSignals:
     divide_and_conquer: bool = False
     implicit_linear_in_loop: bool = False
     inner_recursive_memo: bool = False
-    exponential_loop: bool = False         # FIX B: iterates an exponential/permutation space
-    two_pointer: bool = False              # FIX H: inner loop advances an outer loop's pointer
+    exponential_loop: bool = False
+    two_pointer: bool = False
+    # FIX #1: dimensionality of the memo/DP state (key arity) -> O(n^arity)
+    memo_key_arity: int = 0
+    # FIX #2: recursive calls descend into a bounded structure (tree/graph) -> linear
+    branches_on_substructure: bool = False
+    # FIX #2/#3: a *monotonic* visited/seen set guards recursion (graph traversal -> linear)
+    visited_guard: bool = False
+    # FIX #2/#3: visited state is added AND undone in the same scope (backtracking -> exponential)
+    visited_backtracking: bool = False
 
     def active(self) -> dict:
         """Non-default (i.e. fired) signals, for per-prediction logging."""
@@ -68,9 +77,6 @@ class ComplexityResult:
 _LINEAR_BUILTINS: frozenset = frozenset({
     "min", "max", "sum", "any", "all", "reversed",
 })
-# FIX A: only methods whose cost scales with the loop's n stay here. String-parsing
-# methods (split/join/find/replace/startswith/endswith) were firing the implicit-linear
-# bump on bounded strings inside loops, which turned `quadratic` into a magnet class.
 _LINEAR_METHODS: frozenset = frozenset({
     "count", "index", "remove", "reverse", "copy",
     "update", "intersection", "union", "difference",
@@ -86,19 +92,17 @@ _SETLIKE_CTORS: frozenset = frozenset({
     "set", "dict", "frozenset", "Counter", "defaultdict", "OrderedDict",
 })
 _LISTLIKE_CTORS: frozenset = frozenset({"list", "tuple", "deque"})
-
-# FIX B: iterables whose length is exponential/factorial in n.
 _EXP_ITER: frozenset = frozenset({"permutations", "product"})
 
-# FIX D (opt-in): discount "for _ in range(T): ... input() ..." test-case loops,
-# whose count is the number of test cases, not the algorithm's input size n.
-# Toggle this to A/B its effect on the dataset.
 DISCOUNT_TESTCASE_LOOPS = True
 
-# FIX 1: a *memo table* (stores & reuses computed results) collapses recursion to
-# polynomial.  A *visited set* (seen/visited) used in backtracking does NOT --
-# it only prunes, the call tree is still exponential.  Keep them separate.
 _MEMO_NAMES: frozenset = frozenset({"memo", "cache", "dp"})
+# FIX #3: names/structures that PRUNE a search but do not collapse it.
+_VISITED_NAMES: frozenset = frozenset({"seen", "visited", "vis", "used", "done", "explored"})
+# Constructors that build a memo table (dict-like) vs a visited set (set/list-like).
+_MEMO_CTORS: frozenset = frozenset({"dict", "Counter", "defaultdict", "OrderedDict"})
+_VISITED_CTORS: frozenset = frozenset({"set", "frozenset", "list", "tuple", "deque"})
+_CACHE_DECORATORS: frozenset = frozenset({"lru_cache", "cache"})
 
 
 def _reads_input(node: ast.AST) -> bool:
@@ -120,9 +124,9 @@ class _SignalDetector(ast.NodeVisitor):
         self._loop_depth: int = 0
         self._func_stack: list = []
         self._in_main_block: bool = False
-        self._setlike: set = set()    # names bound to dict/set  -> O(1) membership
-        self._listlike: set = set()   # FIX 3: names bound to list/tuple -> O(n) membership
-        self._while_cond_stack: list = []  # FIX H: stack of enclosing while-condition var sets
+        self._setlike: set = set()
+        self._listlike: set = set()
+        self._while_cond_stack: list = []
 
     @property
     def signals(self) -> DetectionSignals:
@@ -137,12 +141,35 @@ class _SignalDetector(ast.NodeVisitor):
     def _visit_func(self, node: ast.FunctionDef) -> None:
         if self._s.function_name is None:
             self._s.function_name = node.name
-        for default in (*node.args.defaults, *node.args.kw_defaults):
-            if isinstance(default, (ast.Dict, ast.List, ast.Set)):
+
+        # FIX #3: classify default-arg containers as memo (dict-like) vs visited (set/list-like)
+        # instead of treating every Dict/List/Set default as memoization.
+        self._classify_default_args(node)
+
+        # FIX #1: functools.lru_cache / cache decorator == memoization; key arity == #params.
+        for dec in node.decorator_list:
+            if _decorator_name(dec) in _CACHE_DECORATORS:
                 self._s.memoization_detected = True
+                n_params = len([a for a in node.args.args if a.arg not in ("self", "cls")])
+                self._s.memo_key_arity = max(self._s.memo_key_arity, n_params)
+
         self._func_stack.append(node.name)
         self.generic_visit(node)
         self._func_stack.pop()
+
+    def _classify_default_args(self, node: ast.FunctionDef) -> None:
+        pos = node.args.args
+        defaults = node.args.defaults
+        paired = list(zip(pos[len(pos) - len(defaults):], defaults)) if defaults else []
+        paired += [
+            (a, d) for a, d in zip(node.args.kwonlyargs, node.args.kw_defaults) if d is not None
+        ]
+        for arg, default in paired:
+            kind = _classify_container(arg.arg, default)
+            if kind == "memo":
+                self._s.memoization_detected = True
+            elif kind == "visited":
+                self._s.visited_guard = True
 
     # ------------------------------------------------------------------ loops
     def _enter_loop(self, node: ast.AST) -> None:
@@ -158,37 +185,36 @@ class _SignalDetector(ast.NodeVisitor):
 
     def visit_For(self, node: ast.For) -> None:
         if not self._in_main_block and self._is_exponential_iter(node.iter):
-            self._s.exponential_loop = True        # FIX B
+            self._s.exponential_loop = True
         if not self._in_main_block and self._is_testcase_loop(node):
-            self.generic_visit(node)               # FIX D: don't count test-case loop depth
+            self.generic_visit(node)
             return
         self._enter_loop(node)
 
     def _is_testcase_loop(self, node: ast.For) -> bool:
-        """FIX D: `for _ in range(T): ... input ...` repeats per test case, not per n."""
         if not DISCOUNT_TESTCASE_LOOPS or not isinstance(node.target, ast.Name):
             return False
         it = node.iter
         if not (isinstance(it, ast.Call) and isinstance(it.func, ast.Name)
                 and it.func.id == "range"):
-            return False                            # only bounded count loops
+            return False
         if not any(_reads_input(st) for st in node.body):
-            return False                            # each case reads its own input
+            return False
         tgt = node.target.id
         target_uses = sum(1 for n in ast.walk(node)
                           if isinstance(n, ast.Name) and n.id == tgt)
-        return tgt == "_" or target_uses <= 1       # loop var unused -> "repeat T times"
+        return tgt == "_" or target_uses <= 1
 
     @staticmethod
     def _is_exp_expr(e: ast.AST) -> bool:
         if isinstance(e, ast.BinOp):
             if isinstance(e.op, ast.LShift) and _is_const(e.left, 1):
-                return True    # 1 << n
+                return True
             if isinstance(e.op, ast.Pow) and _is_const(e.left, 2):
-                return True    # 2 ** n
+                return True
         if (isinstance(e, ast.Call) and isinstance(e.func, ast.Name)
                 and e.func.id == "pow" and e.args and _is_const(e.args[0], 2)):
-            return True        # pow(2, n)
+            return True
         return False
 
     def _is_exponential_iter(self, it: ast.AST) -> bool:
@@ -205,15 +231,9 @@ class _SignalDetector(ast.NodeVisitor):
         return False
 
     def visit_While(self, node: ast.While) -> None:
-        # FIX F: a while bounded by an exponentially growing quantity
-        # (while (1 << k) < n, while 2 ** k <= n, while pow(2, k) < n) runs
-        # O(log n) times -- it is a logarithmic loop, not a linear scan.
         if self._has_exponential_bound(node.test):
             self._s.halving_detected = True
         cond_vars = {n.id for n in ast.walk(node.test) if isinstance(n, ast.Name)}
-        # FIX H: an inner while that advances an enclosing while's loop variable
-        # is a two-pointer scan -- total inner work is O(n) amortized, NOT a
-        # nested O(n^2) loop. Don't bump loop depth for it.
         if (self._loop_depth > 0 and self._while_cond_stack
                 and self._advances_outer_pointer(node, cond_vars)):
             self._s.two_pointer = True
@@ -226,7 +246,6 @@ class _SignalDetector(ast.NodeVisitor):
         self._while_cond_stack.pop()
 
     def _advances_outer_pointer(self, node: ast.While, cond_vars: set) -> bool:
-        """FIX H: inner while shares a counter with an enclosing while AND mutates it."""
         outer_vars: set = set().union(*self._while_cond_stack)
         shared = cond_vars & outer_vars
         if not shared:
@@ -288,8 +307,9 @@ class _SignalDetector(ast.NodeVisitor):
                 and func.id == self._func_stack[-1]
                 and not self._in_main_block):
             self._s.recursive_calls += 1
-            if self._loop_depth > 0:               # FIX 1
+            if self._loop_depth > 0:
                 self._s.recursion_in_loop = True
+
         # sort detection
         is_sort = False
         if isinstance(func, ast.Name) and func.id == "sorted":
@@ -306,6 +326,7 @@ class _SignalDetector(ast.NodeVisitor):
             self._s.sort_detected = True
         if is_sort and self._loop_depth > 0:
             self._s.sort_in_loop = True
+
         # implicit-linear inside loop
         if self._loop_depth > 0:
             name = None
@@ -317,9 +338,6 @@ class _SignalDetector(ast.NodeVisitor):
                 name = func.attr
                 operand = func.value
             if name in _LINEAR_BUILTINS or name in _LINEAR_METHODS:
-                # FIX E: min(a, b) / max(a, b, c) over multiple scalar args is
-                # O(#args) = O(1), NOT a linear scan. Only a single iterable
-                # argument actually scales with n.
                 multi_arg_minmax = (name in ("min", "max")
                                     and isinstance(func, ast.Name)
                                     and len(node.args) >= 2)
@@ -328,6 +346,7 @@ class _SignalDetector(ast.NodeVisitor):
                         or _reads_input(node)
                     if not reads_input:
                         self._s.implicit_linear_in_loop = True
+
         self.generic_visit(node)
 
     # --------------------------------------------------------- `in` membership
@@ -336,13 +355,8 @@ class _SignalDetector(ast.NodeVisitor):
             for op, comp in zip(node.ops, node.comparators):
                 if isinstance(op, (ast.In, ast.NotIn)):
                     if isinstance(comp, (ast.List, ast.Tuple)):
-                        # literal list/tuple membership is a linear scan
                         self._s.implicit_linear_in_loop = True
                     elif isinstance(comp, ast.Name):
-                        # FIX 3: only count as O(n) when we KNOW it's a list/tuple.
-                        # set/dict are O(1); unknown containers are assumed O(1)
-                        # (conservative) instead of the old assume-list default,
-                        # which made `quadratic` a magnet class.
                         if comp.id in self._listlike and comp.id not in self._setlike:
                             self._s.implicit_linear_in_loop = True
         self.generic_visit(node)
@@ -359,7 +373,6 @@ class _SignalDetector(ast.NodeVisitor):
             self._setlike.add(target.id)
             self._listlike.discard(target.id)
             return
-        # FIX 3: track list/tuple-bound names so known-list membership stays O(n)
         is_listlike = isinstance(value, (ast.List, ast.Tuple, ast.ListComp))
         if (isinstance(value, ast.Call) and isinstance(value.func, ast.Name)
                 and value.func.id in _LISTLIKE_CTORS):
@@ -434,42 +447,132 @@ def _is_int_const_ge(node: ast.AST, k: int) -> bool:
             and not isinstance(node.value, bool) and node.value >= k)
 
 
-def _detect_halving_ast(tree: ast.AST, s: DetectionSignals) -> None:
-    """FIX 2: AST-based halving/doubling detection (binary-search & log loops).
+def _decorator_name(dec: ast.AST) -> str:
+    if isinstance(dec, ast.Call):
+        dec = dec.func
+    if isinstance(dec, ast.Name):
+        return dec.id
+    if isinstance(dec, ast.Attribute):
+        return dec.attr
+    return ""
 
-    Catches forms the old name-anchored regex missed:
-        n //= 2 | n >>= 1 | i *= 2 | i <<= 1 | n = n // 2 | n = n >> 1
+
+def _classify_container(arg_name: str, default: ast.AST) -> Optional[str]:
+    """FIX #3: 'memo' (dict-like, collapses recursion) vs 'visited' (set/list-like, prunes only)."""
+    if arg_name in _MEMO_NAMES:
+        return "memo"
+    if arg_name in _VISITED_NAMES:
+        return "visited"
+    if isinstance(default, ast.Dict):
+        return "memo"
+    if isinstance(default, (ast.Set, ast.List, ast.Tuple)):
+        return "visited"
+    if isinstance(default, ast.Call) and isinstance(default.func, ast.Name):
+        if default.func.id in _MEMO_CTORS:
+            return "memo"
+        if default.func.id in _VISITED_CTORS:
+            return "visited"
+    return None
+
+
+def _subscript_slice(node: ast.Subscript) -> ast.AST:
+    sl = node.slice
+    if isinstance(sl, ast.Index):  # py<3.9 compatibility
+        return sl.value
+    return sl
+
+
+def _detect_memo_arity(tree: ast.AST, s: DetectionSignals) -> None:
+    """FIX #1: estimate the dimensionality of the DP/memo state.
+
+    memo[i]        -> arity 1   (O(n))
+    memo[i][j]     -> arity 2   (O(n^2))
+    memo[(i, j)]   -> arity 2   (O(n^2))
+    @lru_cache f(i, j) -> arity 2 (handled at the decorator site)
     """
+    arity = s.memo_key_arity
     for node in ast.walk(tree):
-        if isinstance(node, ast.AugAssign):
-            op = type(node.op)
-            # FIX C: any integer division by k>=2 (// 2, //= 10, >>= 1...) halves -> log
-            if op in (ast.FloorDiv, ast.Div) and _is_int_const_ge(node.value, 2):
-                s.halving_detected = True
-            elif op is ast.RShift and _is_int_const_ge(node.value, 1):
-                s.halving_detected = True
-            elif op is ast.Mult and _is_int_const_ge(node.value, 2):
-                s.halving_detected = True            # doubling toward n -> log n
-            elif op is ast.LShift and _is_int_const_ge(node.value, 1):
-                s.halving_detected = True
-        elif isinstance(node, ast.Assign):
-            # FIX G: a variable reassigned to (a function of) ITSELF divided by a
-            # const halves -> log n.  Examples: x = x // 2 | x = int(x / 2) |
-            # x = x >> 1 | x = math.floor(x / 3).  Requiring self-reference avoids
-            # flagging one-off midpoints like `mid = len(arr) // 2` as logarithmic.
-            # Binary-search midpoints (mid = (lo + hi) // 2) keep their log signal
-            # via the lo/hi range-narrowing patterns and the _HALVING_PATTERNS regex.
-            v = node.value
-            target_names = {t.id for t in node.targets if isinstance(t, ast.Name)}
-            if target_names:
-                for sub in ast.walk(v):
-                    if (isinstance(sub, ast.BinOp) and isinstance(sub.left, ast.Name)
-                            and sub.left.id in target_names):
-                        op = type(sub.op)
-                        if op in (ast.FloorDiv, ast.Div) and _is_int_const_ge(sub.right, 2):
-                            s.halving_detected = True
-                        elif op is ast.RShift and _is_int_const_ge(sub.right, 1):
-                            s.halving_detected = True
+        if not isinstance(node, ast.Subscript):
+            continue
+        chain = 0
+        base = node
+        while isinstance(base, ast.Subscript):
+            chain += 1
+            base = base.value
+        if isinstance(base, ast.Name) and base.id in _MEMO_NAMES:
+            a = chain
+            sl = _subscript_slice(node)
+            if isinstance(sl, ast.Tuple):
+                a = max(a, len(sl.elts))
+            arity = max(arity, a)
+    if s.memoization_detected and arity == 0:
+        arity = 1
+    s.memo_key_arity = arity
+
+
+def _setlike_names(tree: ast.AST) -> set:
+    """Names bound to a set/frozenset (candidate visited containers)."""
+    names = set(_VISITED_NAMES)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign):
+            val = node.value
+            is_set = isinstance(val, (ast.Set, ast.SetComp))
+            if (isinstance(val, ast.Call) and isinstance(val.func, ast.Name)
+                    and val.func.id in ("set", "frozenset")):
+                is_set = True
+            if is_set:
+                for t in node.targets:
+                    if isinstance(t, ast.Name):
+                        names.add(t.id)
+    return names
+
+
+def _detect_visited_pattern(tree: ast.AST, s: DetectionSignals) -> None:
+    """FIX #2/#3: distinguish a monotonic visited-set (graph traversal -> linear)
+    from a backtracking add/undo (state restored -> exponential)."""
+    containers = _setlike_names(tree)
+    guarded = added = removed = False
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Compare):
+            for op, comp in zip(node.ops, node.comparators):
+                if isinstance(op, (ast.In, ast.NotIn)) and isinstance(comp, ast.Name) \
+                        and comp.id in containers:
+                    guarded = True
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+            base = node.func.value
+            if isinstance(base, ast.Name) and base.id in containers:
+                if node.func.attr in {"add", "append", "push", "update"}:
+                    added = True
+                if node.func.attr in {"remove", "discard", "pop"}:
+                    removed = True
+        if isinstance(node, ast.Assign):
+            for t in node.targets:
+                if isinstance(t, ast.Subscript) and isinstance(t.value, ast.Name) \
+                        and t.value.id in containers:
+                    added = True
+        if isinstance(node, ast.Delete):
+            for t in node.targets:
+                if isinstance(t, ast.Subscript) and isinstance(t.value, ast.Name) \
+                        and t.value.id in containers:
+                    removed = True
+    s.visited_guard = s.visited_guard or guarded or added
+    s.visited_backtracking = s.visited_backtracking or (added and removed)
+
+
+def _detect_traversal_shape(tree: ast.AST, s: DetectionSignals) -> None:
+    """FIX #2: recursive calls whose arguments descend into a data structure
+    (node.left, root.children, arr[1:]) traverse a bounded structure -> linear,
+    NOT exponential."""
+    recursive_names = set()
+    for fn in ast.walk(tree):
+        if isinstance(fn, ast.FunctionDef) and _count_calls_in_node(fn, fn.name) > 0:
+            recursive_names.add(fn.name)
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                and node.func.id in recursive_names):
+            for a in node.args:
+                if isinstance(a, (ast.Attribute, ast.Subscript)):
+                    s.branches_on_substructure = True
 
 
 def _count_calls_in_node(node: ast.AST, name: str) -> int:
@@ -504,8 +607,7 @@ def _detect_source_patterns(source: str, tree: ast.AST, s: DetectionSignals) -> 
             if pat.search(line):
                 s.halving_detected = True
                 break
-    _detect_halving_ast(tree, s)        # FIX 2
-    # FIX C: recursion that passes a halved argument -- f(n // 2), f(n >> 1) -- is O(log n)
+    _detect_halving_ast(tree, s)
     if s.function_name and s.recursive_calls > 0:
         for node in ast.walk(tree):
             if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
@@ -530,6 +632,32 @@ def _detect_source_patterns(source: str, tree: ast.AST, s: DetectionSignals) -> 
         s.effective_loop_depth = 2
 
 
+def _detect_halving_ast(tree: ast.AST, s: DetectionSignals) -> None:
+    for node in ast.walk(tree):
+        if isinstance(node, ast.AugAssign):
+            op = type(node.op)
+            if op in (ast.FloorDiv, ast.Div) and _is_int_const_ge(node.value, 2):
+                s.halving_detected = True
+            elif op is ast.RShift and _is_int_const_ge(node.value, 1):
+                s.halving_detected = True
+            elif op is ast.Mult and _is_int_const_ge(node.value, 2):
+                s.halving_detected = True
+            elif op is ast.LShift and _is_int_const_ge(node.value, 1):
+                s.halving_detected = True
+        elif isinstance(node, ast.Assign):
+            v = node.value
+            target_names = {t.id for t in node.targets if isinstance(t, ast.Name)}
+            if target_names:
+                for sub in ast.walk(v):
+                    if (isinstance(sub, ast.BinOp) and isinstance(sub.left, ast.Name)
+                            and sub.left.id in target_names):
+                        op = type(sub.op)
+                        if op in (ast.FloorDiv, ast.Div) and _is_int_const_ge(sub.right, 2):
+                            s.halving_detected = True
+                        elif op is ast.RShift and _is_int_const_ge(sub.right, 1):
+                            s.halving_detected = True
+
+
 # ===========================================================================
 # Inference
 # ===========================================================================
@@ -538,8 +666,11 @@ def _infer_complexity(s: DetectionSignals):
     if effective_depth == 0 and s.total_loops_in_file > 0 and s.recursive_calls == 0:
         effective_depth = min(s.total_loops_in_file, 2)
 
+    space = "O(1)"
+    space_why = "Only fixed-size variables used \u2014 constant extra space."
+
     # -- time --
-    if s.exponential_loop:                          # FIX B
+    if s.exponential_loop:
         time = "O(2\u207f)"
         time_why = ("Iterates over an exponential/permutation search space "
                     "(2**n, 1<<n, or permutations/product) \u2014 exponential.")
@@ -560,9 +691,23 @@ def _infer_complexity(s: DetectionSignals):
                 time = "O(log n)"
                 time_why = "Input is halved each recursive call with no extra linear work."
         elif s.memoization_detected:
+            # FIX #1: memoized recursion is O(#states) = O(n^arity), NOT always O(n).
+            k = max(s.memo_key_arity, 1)
+            time, time_why = _poly_from_degree(
+                k, "Recursive with memoization \u2014 "
+                f"{k}-D memo key -> {k} dimension(s) of n distinct subproblems.")
+        elif s.visited_backtracking:
+            # FIX #2: state added then undone -> genuine exponential search.
+            base = max(s.recursive_branches, 2)
+            time = f"O({base}\u207f)"
+            time_why = "Backtracking recursion (visited state added then undone) \u2014 exponential search space."
+        elif s.branches_on_substructure or s.visited_guard:
+            # FIX #2: calls descend into a bounded structure / guarded by a monotonic
+            # visited-set (tree / graph traversal) -> linear in total nodes & edges.
             time = "O(n)"
-            time_why = "Recursive with memoization \u2014 each subproblem computed once."
-        elif s.recursive_branches >= 2 or s.recursion_in_loop:        # FIX 1
+            time_why = ("Recursive calls descend into a bounded structure or are guarded by a "
+                        "monotonic visited-set (tree/graph traversal) \u2014 linear in total nodes.")
+        elif s.recursive_branches >= 2 or s.recursion_in_loop:
             base = max(s.recursive_branches, 2)
             time = f"O({base}\u207f)"
             if s.recursion_in_loop and s.recursive_branches < 2:
@@ -582,8 +727,10 @@ def _infer_complexity(s: DetectionSignals):
                 time = "O(n)"
                 time_why = "Single recursive call per invocation \u2014 linear recursion depth."
     elif s.memoization_detected and s.total_loops_in_file > 0 and s.recursive_calls == 0:
-        time = "O(n)"
-        time_why = "Memoized computation \u2014 each unique subproblem solved once."
+        # FIX #1: tabulated DP is O(n^max(state-arity, loop-nesting)), NOT always O(n).
+        degree = max(max(s.memo_key_arity, 1), s.effective_loop_depth)
+        time, time_why = _poly_from_degree(
+            degree, f"Tabulated DP \u2014 {degree}-dimensional state table.")
     elif s.sort_in_loop:
         time = "O(n\u00b2 log n)"
         time_why = "Sort operation (O(n log n)) called inside a loop."
@@ -623,19 +770,27 @@ def _infer_complexity(s: DetectionSignals):
         space = "O(n)"
         space_why = "Recursion call stack plus temporary arrays created during splits."
     elif s.recursive_calls > 0 and s.memoization_detected:
-        space = "O(n)"
-        space_why = "Memo table and recursion call stack each grow to O(n)."
+        space = "O(n)" if s.memo_key_arity <= 1 else _poly_from_degree(s.memo_key_arity, "")[0]
+        space_why = "Memo table and recursion call stack."
     elif s.recursive_calls > 0:
         space = "O(n)"
         space_why = "Recursion call stack depth is proportional to input size."
     elif s.growing_structures:
         space = "O(n)"
         space_why = "Data structures (list/dict/set) grow proportionally with input."
-    else:
-        space = "O(1)"
-        space_why = "Only fixed-size variables used \u2014 constant extra space."
 
     return time, space, time_why, space_why
+
+
+def _poly_from_degree(degree: int, why: str):
+    """Map a polynomial degree to a Big-O string + reason."""
+    if degree <= 1:
+        return "O(n)", why
+    if degree == 2:
+        return "O(n\u00b2)", why
+    if degree == 3:
+        return "O(n\u00b3)", why
+    return f"O(n^{degree})", why
 
 
 # ===========================================================================
@@ -656,7 +811,6 @@ def _find_inner_recursive_helpers(tree: ast.AST, signals: DetectionSignals) -> N
         )
         if self_calls == 0:
             continue
-        # FIX 1: inner helper recursing inside a loop -> branching/exponential
         for loop in ast.walk(node):
             if isinstance(loop, (ast.For, ast.While)) and _count_calls_in_node(loop, inner_name) > 0:
                 signals.recursion_in_loop = True
@@ -676,7 +830,7 @@ def _find_inner_recursive_helpers(tree: ast.AST, signals: DetectionSignals) -> N
             signals.inner_recursive_memo = True
             signals.recursive_calls = max(signals.recursive_calls, 1)
         elif self_calls >= 2:
-            signals.recursive_calls = max(signals.recursive_calls, self_calls)
+            signals.recursive_calls = max(signals.recursive_calls, 1)
             signals.recursive_branches = max(signals.recursive_branches, self_calls)
         else:
             signals.recursive_calls = max(signals.recursive_calls, 1)
@@ -690,6 +844,9 @@ def analyze(source: str) -> ComplexityResult:
     signals = detector.signals
     _find_inner_recursive_helpers(tree, signals)
     _detect_source_patterns(source, tree, signals)
+    _detect_memo_arity(tree, signals)         
+    _detect_visited_pattern(tree, signals)    
+    _detect_traversal_shape(tree, signals)    
     time, space, time_why, space_why = _infer_complexity(signals)
     return ComplexityResult(
         time_complexity=time,
