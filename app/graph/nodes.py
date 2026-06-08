@@ -199,18 +199,21 @@ def convergence_node(state: AgentState) -> dict:
     return {"quality_scores": history}
 
 def regression_check_node(state: AgentState) -> dict:
-    original = state.get("original_code_converted") or state["original_code"]
-    result = differential_check(
-        original=original,
-        refactored=state["refactored_code"][-1] if state.get("refactored_code") else "",
-        cases=state.get("test_inputs") or [],
-        mode=state.get("test_mode", "stdio"),
-        driver=state.get("test_driver", ""),
-    )
-    return {
-        "regression_verdict": result.verdict,
-        "regression_report": result.report,
-    }
+	original = state.get("original_code_converted") or state["original_code"]
+	cases = state.get("test_inputs") or []
+	if not cases:
+		print("[regression] WARNING: characterizer produced 0 cases — nothing to check")
+	result = differential_check(
+		original=original,
+		refactored=state["refactored_code"][-1] if state.get("refactored_code") else "",
+		cases=cases,
+		mode=state.get("test_mode", "stdio"),
+		driver=state.get("test_driver", ""),
+	)
+	return {
+		"regression_verdict": result.verdict,
+		"regression_report": result.report,
+	}
 
 def destroy_last_node(state: AgentState) -> dict:
     """Remove the last refactor from state, effectively undoing it."""

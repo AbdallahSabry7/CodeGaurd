@@ -1,12 +1,4 @@
-"""
-DIP (Dependency Inversion Principle) Analyzer
-==============================================
-Statically analyses Python source code for violations of the Dependency
-Inversion Principle:
-
-    "High-level modules should not depend on low-level modules.
-     Both should depend on abstractions."
-
+"""""
 Rules
 -----
 DIP001  __init__ parameter typed with a concrete class.

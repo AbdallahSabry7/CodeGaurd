@@ -6,8 +6,9 @@ every internal function is renamed, split, merged, or replaced.
 Choose the boundary mode:
 - "stdio": the code is a program/script that reads standard input and writes standard
   output (has a __main__ block, calls input()/sys.stdin, or prints results).
-- "api": the code is a library of functions with no I/O. You will write a DRIVER: a
-  python snippet that reads a JSON object from stdin, calls the PUBLIC (module-level,
+  Leave the driver empty in this mode.
+- "api": the code is a library of functions with no I/O. Write a driver: a Python
+  snippet that reads a single JSON object from stdin, calls the PUBLIC (module-level,
   non-underscore) functions with those args, and prints the results.
 
 Rules:
@@ -15,12 +16,11 @@ Rules:
 - Prefer inputs that exercise as many distinct branches of the ORIGINAL as possible.
 - Only reference PUBLIC function names. Never call private (_-prefixed) helpers.
 - Be deterministic: no time, no randomness, no network. Sort any unordered output.
-- Output STRICT JSON only. No prose, no markdown fences.
 
-Schema:
-{
-  "mode": "stdio" | "api",
-  "driver": "<python source; empty string when mode is stdio>",
-  "cases": [{ "name": "short-id", "stdin": "<exact bytes fed to stdin>" }]
-}
+Fields to produce:
+- mode: either "stdio" or "api" (see above).
+- driver: Python source for the api driver, or an empty string when mode is "stdio".
+- cases: a list of 6-12 items, each with:
+    - name: a short identifier for the case.
+    - stdin: the exact text fed to standard input for that case.
 """

@@ -2,9 +2,10 @@ import re
 from langchain_core.messages import SystemMessage, HumanMessage
 from schemas import AgentState
 from prompts import (
-    REFACTOR_SYSTEM_PROMPT,
-    REFACTOR_SYNTAX_PROMPT,
-    REFACTOR_BEHAVIOR_PROMPT,
+	REFACTOR_SYSTEM_PROMPT,
+	REFACTOR_SYNTAX_PROMPT,
+	REFACTOR_BEHAVIOR_PROMPT,
+	REFACTOR_EXECUTION_PROMPT,  
 )
 from llms import refactor_llm
 
@@ -33,14 +34,14 @@ def refactor_agent(state: AgentState) -> dict:
         else:
             code = state.get("original_code","")
     else:
-        code = state.get("refactored_code","")
+        code = state["refactored_code"][-1] if state.get("refactored_code") else ""
 
     if syntax_error:
         report = f"SyntaxError in your refactored code:\n{syntax_error}"
         prompt = REFACTOR_SYNTAX_PROMPT
     elif "FAIL" in execution_result:
         report = execution_result
-        prompt = REFACTOR_SYNTAX_PROMPT
+        prompt = REFACTOR_EXECUTION_PROMPT
     elif behavior_diff:                      
         report = behavior_diff
         prompt = REFACTOR_BEHAVIOR_PROMPT

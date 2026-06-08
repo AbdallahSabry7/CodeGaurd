@@ -102,3 +102,35 @@ Equivalence report:
 Current refactored code:
 {refactored_code}
 """
+
+REFACTOR_EXECUTION_PROMPT = _refactor_prompt(
+	instruction=(
+		"Your previously refactored code is syntactically valid but FAILED AT RUNTIME when "
+		"executed in a sandbox. Below is the executor's failure report (exception type, "
+		"message, and traceback). Diagnose the ROOT CAUSE and fix it so the code runs "
+		"successfully. This is a repair pass, not a re-architecture: keep every correct "
+		"improvement from earlier passes and change as little as possible beyond what the "
+		"error requires."
+	),
+	inputs=[
+		"Your previous refactored version (the code to fix)",
+		"The executor's runtime failure report (exception type, message, traceback)",
+	],
+	extra_rules=(
+		"### Runtime-Repair Constraints",
+		"- Fix the ROOT CAUSE of the reported exception, not just its surface symptom.",
+		"- Make the SMALLEST change that makes the code run; do not touch unrelated code.",
+		"- Do NOT introduce any new SOLID or clean-code violation in order to make the "
+		"error go away (e.g. dumping logic into one function, adding a god-object, or "
+		"removing type hints/docstrings).",
+		"- Do NOT worsen time or space complexity. Keep the same algorithmic approach: do "
+		"not add nested loops, repeated scans, or extra full-size copies of data where the "
+		"code previously did a single pass or worked in place.",
+		"- Prefer O(1) fixes — guard clauses, correct types, fixing a bad call/import/index, "
+		"initializing a variable — over fixes that add new iteration or allocation.",
+		"- If a try/except is genuinely required, catch the SPECIFIC exception type; never "
+		"use a bare 'except:' or 'except Exception' that swallows errors.",
+		"- Preserve public (module-level, non-underscore) function and class names and their "
+		"signatures — they are the program's contract.",
+	),
+)
