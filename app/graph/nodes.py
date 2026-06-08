@@ -10,7 +10,7 @@ def validate_translator_code(state: AgentState) -> dict:
     if iterations == 0:
         code = state.get("original_code_converted", "")
     else:
-        code = state.get("refactored_code", "")
+        code = state.get("refactored_code")[-1] if state.get("refactored_code") else ""
     try:
         ast.parse(code)
         return {"translator_syntax_error": None}
@@ -18,7 +18,10 @@ def validate_translator_code(state: AgentState) -> dict:
         return {"translator_syntax_error": f"SyntaxError at line {e.lineno}: {e.msg}"}
 
 def validate_refactored_code(state: AgentState) -> dict:
-    code = state.get("refactored_code", "")
+    if state.get("refactored_code"):
+        code = state["refactored_code"][-1]
+    else:
+        code = ""
     try:
         ast.parse(code)
         return {"refactor_syntax_error": None}
@@ -27,7 +30,7 @@ def validate_refactored_code(state: AgentState) -> dict:
 
 def analyzer_function(state: AgentState) -> str:
     if state.get("refactored_code"):
-        code_to_analyze = state["refactored_code"]
+        code_to_analyze = state["refactored_code"][-1]
     elif state.get("original_code_converted"):
         code_to_analyze = state["original_code_converted"]
     else:
@@ -41,7 +44,12 @@ def analyzer_function(state: AgentState) -> str:
         return {"analyzer_report": response }
     
 def executer_function(state: AgentState) -> str:
-    code_to_execute = state.get("refactored_code", "")
+    if state.get("refactored_code"):
+        code_to_execute = state["refactored_code"][-1]
+    elif state.get("original_code_converted"):
+        code_to_execute = state["original_code_converted"]
+    else:
+        code_to_execute = state["original_code"]
     response = execute_code_tool.invoke({"code": code_to_execute})
     return {"execution_result": response}
 
@@ -68,14 +76,14 @@ _UNSUPPORTED_COMPILED = {
 _SUPPORTED_SIGNALS = {
     # (pattern, language, score)
     "cpp": [
-        (re.compile(r'#include\s*[<"]'),                        10),
-        (re.compile(r'\bint\s+main\s*\('),                       8),
-        (re.compile(r'\bstd::'),                                  8),
-        (re.compile(r'\bcout\b|\bcin\b'),                         7),
-        (re.compile(r'#define\s+\w+'),                            5),
-        (re.compile(r'\btemplate\s*<'),                           8),
-        (re.compile(r'(::|\->)\w+'),                              4),
-        (re.compile(r'\bnew\s+\w+\s*[\(\[]'),                     3),
+        # ... your existing patterns ...
+        (re.compile(r'^\s*(public|private|protected)\s*:\s*$', re.MULTILINE), 9),  # access-specifier labels
+        (re.compile(r'\bvirtual\b'),                                          7),
+        (re.compile(r'\boverride\b'),                                         7),
+        (re.compile(r'\)\s*const\b'),                                         6),  # const member fns
+        (re.compile(r':\s*(public|private|protected)\s+\w+'),                 7),  # C++ inheritance
+        (re.compile(r'\bclass\s+\w+[^:{\n]*\{'),                              7),  # "class X {" (brace, not colon)
+        (re.compile(r'\}\s*;\s*$', re.MULTILINE),                             5),  # class/struct close "};"
     ],
     "java": [
         (re.compile(r'\bpublic\s+class\s+\w+'),                  10),
@@ -88,14 +96,13 @@ _SUPPORTED_SIGNALS = {
         (re.compile(r'new\s+\w+\s*\('),                            2),
     ],
     "python": [
-        (re.compile(r'^\s*def\s+\w+\s*\(',        re.MULTILINE), 10),
-        (re.compile(r'^\s*from\s+\w+\s+import\s+',re.MULTILINE),  8),
-        (re.compile(r'\bself\.\w+'),                               6),
-        (re.compile(r'^\s*class\s+\w+(\([\w,\s]*\))?:',re.MULTILINE), 7),
-        (re.compile(r'->\s*\w+:|:\s*(int|str|float|bool|list|dict)\b'), 5),
-        (re.compile(r':\s*$',                      re.MULTILINE),  5),
-        (re.compile(r'print\s*\('),                                3),
-        (re.compile(r'^\s{4}\w+|^\t\w+',          re.MULTILINE),  3),
+        # ... keep def/from/self/class patterns ...
+        # block headers only — not any trailing colon:
+        (re.compile(r'^\s*(def|class|if|elif|else|for|while|try|except|finally|with)\b.*:\s*$', re.MULTILINE), 6),
+        # type hints: a name : type, but NOT an access specifier label:
+        (re.compile(r'\b(?!public|private|protected)\w+\s*:\s*(int|str|float|bool|list|dict)\b'), 5),
+        (re.compile(r'\bprint\s*\('), 3),
+        # drop "^\s{4}\w+" entirely — every brace language indents too
     ],
 }
 
@@ -112,6 +119,16 @@ _NEGATIVE_SIGNALS = [
     (re.compile(r'\bimport\s+java\.'),           "python", -10),
     (re.compile(r'\bimport\s+java\.'),           "cpp",    -10),
 ]
+
+_NEGATIVE_SIGNALS += [
+    (re.compile(r';\s*$', re.MULTILINE),                                  "python", -6),  # statement terminators
+    (re.compile(r'\}\s*;', re.MULTILINE),                                 "python", -6),  # "};"
+    (re.compile(r'\{\s*$', re.MULTILINE),                                 "python", -4),  # block opener
+    (re.compile(r'\boverride\b'),                                         "python", -8),
+    (re.compile(r'\bvirtual\b'),                                          "python", -8),
+    (re.compile(r'^\s*(public|private|protected)\s*:\s*$', re.MULTILINE), "python", -8),
+]
+
 
 
 def detect_language(state: AgentState) -> dict:
@@ -185,7 +202,7 @@ def regression_check_node(state: AgentState) -> dict:
     original = state.get("original_code_converted") or state["original_code"]
     result = differential_check(
         original=original,
-        refactored=state["refactored_code"],
+        refactored=state["refactored_code"][-1] if state.get("refactored_code") else "",
         cases=state.get("test_inputs") or [],
         mode=state.get("test_mode", "stdio"),
         driver=state.get("test_driver", ""),
@@ -193,4 +210,15 @@ def regression_check_node(state: AgentState) -> dict:
     return {
         "regression_verdict": result.verdict,
         "regression_report": result.report,
+    }
+
+def destroy_last_node(state: AgentState) -> dict:
+    """Remove the last refactor from state, effectively undoing it."""
+    if not state.get("refactored_code"):
+        return {} 
+    new_history = state["refactored_code"][:-1]
+    return {
+        "refactored_code": new_history,
+        "refactor_iterations": max(state.get("refactor_iterations", 1) - 1, 0),
+        "quality_scores": state.get("quality_scores", [])[:-1],  
     }

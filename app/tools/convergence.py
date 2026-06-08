@@ -99,5 +99,7 @@ class ConvergenceController:
         if loops >= self.max_improvement_loops:  
             return "finalize"
         if len(history) >= 2 and (history[-2] - history[-1]) < self.min_gain:
-            return "finalize"                    
+            if history[-1] > history[-2]:
+                return "finalize and destroy last refactor" 
+                    
         return "continue"

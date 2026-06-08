@@ -23,10 +23,17 @@ def _format_directives(directives: list[dict]) -> str:
 
 
 def refactor_agent(state: AgentState) -> dict:
+    iterations = state.get("refactor_iterations", 0)
     syntax_error = state.get("refactor_syntax_error")
     execution_result = state.get("execution_result") or ""
     behavior_diff = state.get("behavior_diff")
-    code = state.get("refactored_code") or state["original_code"]
+    if iterations == 0:
+        if state.get("original_code_converted"):
+            code = state.get("original_code_converted","")
+        else:
+            code = state.get("original_code","")
+    else:
+        code = state.get("refactored_code","")
 
     if syntax_error:
         report = f"SyntaxError in your refactored code:\n{syntax_error}"
@@ -54,11 +61,19 @@ def refactor_agent(state: AgentState) -> dict:
     raw = response.content
     fenced = re.search(r"```(?:python)?\s*\n(.*?)```", raw, re.DOTALL)
     clean_code = fenced.group(1).strip() if fenced else raw.strip()
-
-    return {
-        "messages": [response],
-        "refactored_code": clean_code,
-        "refactor_syntax_error": None,
-        "behavior_diff": None,               
-        "refactor_iterations": state.get("refactor_iterations", 0) + 1,
-    }
+    if iterations == 0:
+        return {
+            "messages": [response],
+            "refactored_code": [clean_code],
+            "refactor_syntax_error": None,
+            "behavior_diff": None,               
+            "refactor_iterations": iterations + 1,
+        }
+    else:
+        return {
+            "messages": [response],
+            "refactored_code": state["refactored_code"] + [clean_code],
+            "refactor_syntax_error": None,
+            "behavior_diff": None,               
+            "refactor_iterations": iterations + 1,
+        }

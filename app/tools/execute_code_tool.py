@@ -39,6 +39,5 @@ def execute_code_tool(code: str) -> str:
             f"({reason}). No execution errors detected."
         )
 
-    # 3. status == "ok" — inject pip bootstrap then run
     code = _inject_installer(code)
     return run_in_docker(code).to_tool_string()

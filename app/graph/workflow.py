@@ -6,7 +6,7 @@ from schemas import AgentState
 from agents import refactor_agent, translate_from_python , translate_to_python , architect_agent , characterize_node
 from tools import analysis_tool, execute_code_tool
 from .routers import analyzer_router, syntax_check_router, executer_router, main_router , translator_router , syntax_check_router2 , route_after_architect , convergence_router , regression_router
-from .nodes import validate_refactored_code,validate_translator_code , analyzer_function, executer_function, detect_language , convergence_node , regression_check_node
+from .nodes import validate_refactored_code,validate_translator_code , analyzer_function, executer_function, detect_language , convergence_node , regression_check_node , destroy_last_node
 
 def build_graph():
     graph = StateGraph(AgentState)
@@ -22,6 +22,7 @@ def build_graph():
     graph.add_node("syntax_check2", validate_translator_code)
     graph.add_node("characterize", characterize_node)
     graph.add_node("regression_check", regression_check_node)
+    graph.add_node("destroy_last_refactor", destroy_last_node)
 
     graph.add_edge(START, "detect_language")
 
@@ -61,7 +62,6 @@ def build_graph():
         "architect",
         route_after_architect,
         {
-            'END': END,
             "refactor": "Refactor Agent",
             "convergence": "Convergence Node",
         },
@@ -84,9 +84,12 @@ def build_graph():
         convergence_router,
         {
             "continue": "Refactor Agent",
-            "finalize": "executer"
+            "finalize": "executer",
+            "finalize and destroy last refactor": "destroy_last_refactor"
         },
     )
+
+    graph.add_edge("destroy_last_refactor", "executer")
 
     graph.add_conditional_edges(
         "executer",
@@ -94,6 +97,7 @@ def build_graph():
         {
             "refactor": "Refactor Agent",
             "equivalence": "regression_check",
+            "translate_out": "Translate from Python",
             "end": END,
         }
     )

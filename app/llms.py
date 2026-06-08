@@ -6,7 +6,7 @@ from helpers.config import get_settings, Settings
 settings = get_settings()
 
 translator_llm = ChatGroq(
-    model= settings.model3,
+    model= settings.model1,
     api_key=settings.GROQ_API_KEY,
     temperature=0.2,
 )

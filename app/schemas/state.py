@@ -9,7 +9,7 @@ class AgentState(TypedDict):
     original_code:            str
     original_code_converted:   str
     translator_code:          Optional[str]
-    refactored_code:          str
+    refactored_code:          list[str]
     refactor_iterations:      int
     execution_result:         str
     refactor_syntax_error:    Optional[str]

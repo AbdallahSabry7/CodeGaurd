@@ -77,9 +77,8 @@ def _extract_json(text: str) -> dict:
         return json.loads(match.group(0))
 
 
-def _build_user_payload(language, code, analyzer_report, previously_rejected):
+def _build_user_payload(code, analyzer_report, previously_rejected):
     return (
-        f"LANGUAGE: {language}\n\n"
         f"CODE UNDER REVIEW:\n{code}\n\n"
         f"ANALYZER REPORT:\n{json.dumps(analyzer_report, indent=2)}\n\n"
         f"PREVIOUSLY REJECTED:\n{json.dumps(previously_rejected, indent=2)}"
@@ -135,14 +134,14 @@ def _merge_rejected(existing: list[dict], new: list) -> list[dict]:
     return merged
 
 
-def _run_architect(language, code, analyzer_report, previously_rejected=None,
+def _run_architect(code, analyzer_report, previously_rejected=None,
                 max_retries=2) -> ArchitectReport:
     """Call the LLM, validate against the schema, retry on malformed output."""
     previously_rejected = previously_rejected or []
     messages = [
         {"role": "system", "content": ARCHITECT_SYSTEM_PROMPT},
         {"role": "user", "content": _build_user_payload(
-            language, code, analyzer_report, previously_rejected)},
+            code, analyzer_report, previously_rejected)},
     ]
     last_err: Optional[Exception] = None
     for _ in range(max_retries + 1):
@@ -163,11 +162,15 @@ def _run_architect(language, code, analyzer_report, previously_rejected=None,
 # NODE — runs after EVERY analyzer pass:  (state) -> dict
 # ======================================================================
 def architect_agent(state: "AgentState") -> dict:
-    code = state.get("refactored_code") or state["original_code"]
+    if state.get("refactor_iterations"):
+        code = state.get("refactored_code","")
+    elif state.get("original_code_converted"):
+        code = state.get("original_code_converted","")
+    else:
+        code = state.get("original_code","")
     report = _run_architect(
-        language=state.get("language", "python"),
         code=code,
-        analyzer_report=state["analyzer_report"],          # latest analyzer output
+        analyzer_report=state["analyzer_report"],
         previously_rejected=state.get("architect_rejected", []),
     )
     out = {

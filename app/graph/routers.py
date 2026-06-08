@@ -37,13 +37,19 @@ def syntax_check_router2(state: AgentState) -> str:
 def executer_router(state: AgentState) -> str:
     result = state.get("execution_result", "")
     iterations = state.get("refactor_iterations", 0)
-    source_language = state.get("source_language")
+    source_language = state.get("source_language").lower()
 
     if iterations >= max_iterations:
         return "end"
 
     if "FAIL" in result:
-        return "refactor"
+        if "[docker_unavailable]" in result:
+            if source_language == "python":
+                return "end"
+            else:
+                return "translate_out"
+        else:
+            return "refactor"
     
     return "equivalence"
 
@@ -65,7 +71,7 @@ def translator_router(state: AgentState) -> str:
     
 def route_after_architect(state):
     if state["architect_verdict"] == "HALT_PERFECT_ENOUGH":
-        return 'END'
+        return 'convergence'
     return "refactor" if not state.get("refactored_code") else "convergence"
 
 def convergence_router(state: AgentState) -> str:
@@ -75,9 +81,8 @@ def convergence_router(state: AgentState) -> str:
     )
 
 def regression_router(state: AgentState) -> str:
-    # Only a real behavior change sends code back to refactor.
     if state.get("regression_verdict") == "DIFFERENT" and \
         state.get("refactor_iterations", 0) < settings.max_iterations:
         return "refactor"
-    lang = (state.get("language") or state.get("source_language") or "python").lower()
+    lang = state.get("source_language").lower()
     return "translate_out" if lang in ("java", "cpp") else "done"
