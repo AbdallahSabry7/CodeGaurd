@@ -2,3 +2,4 @@ from .refactor_prompt import REFACTOR_SYSTEM_PROMPT , REFACTOR_SYNTAX_PROMPT , R
 from .translator_prompt import CPP_TO_PYTHON_PROMPT, PYTHON_TO_CPP_PROMPT, JAVA_TO_PYTHON_PROMPT, PYTHON_TO_JAVA_PROMPT, SYNTAX_ERROR_PROMPT
 from .architect_prompt import ARCHITECT_SYSTEM_PROMPT
 from .characterize_prompt import CHARACTERIZE_SYSTEM_PROMPT
+from .report_prompt import REPORT_PROMPT

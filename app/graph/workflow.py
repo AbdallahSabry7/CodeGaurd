@@ -3,7 +3,7 @@ from langgraph.graph import StateGraph, START, END
 import ast
 
 from schemas import AgentState
-from agents import refactor_agent, translate_from_python , translate_to_python , architect_agent , characterize_node
+from agents import refactor_agent, translate_from_python , translate_to_python , architect_agent , characterize_node , report_agent
 from tools import analysis_tool, execute_code_tool
 from .routers import syntax_check_router, executer_router, main_router , translator_router , syntax_check_router2 , route_after_architect , convergence_router , regression_router
 from .nodes import validate_refactored_code,validate_translator_code , analyzer_function, executer_function, detect_language , convergence_node , regression_check_node , destroy_last_node
@@ -23,6 +23,7 @@ def build_graph():
     graph.add_node("characterize", characterize_node)
     graph.add_node("regression_check", regression_check_node)
     graph.add_node("destroy_last_refactor", destroy_last_node)
+    graph.add_node("Report Agent", report_agent)
 
     graph.add_edge(START, "detect_language")
 
@@ -30,7 +31,7 @@ def build_graph():
         "detect_language",
         main_router,
         {
-            "end": END,
+            "end": "Report Agent",
             "characterize": "characterize",
             "translator": "Translate to Python"
         }
@@ -40,7 +41,7 @@ def build_graph():
         translator_router,
         {
             "characterize": "syntax_check2",
-            "end": END,
+            "end": "Report Agent",
         }
     )
 
@@ -50,7 +51,7 @@ def build_graph():
         {
             "fix": "Translate to Python",
             "proceed": "characterize",
-            'end': END
+            'end': "Report Agent"
         }
     )
 
@@ -76,7 +77,7 @@ def build_graph():
             "fix": "Refactor Agent",
             "proceed": "analyzer",
             "translate_out": "Translate from Python",  
-            "end": END,
+            "end": "Report Agent",
         },
     )
 
@@ -99,7 +100,7 @@ def build_graph():
             "refactor": "Refactor Agent",
             "equivalence": "regression_check",
             "translate_out": "Translate from Python",
-            "end": END,
+            "end": "Report Agent",
         }
     )
 
@@ -109,11 +110,13 @@ def build_graph():
         {
             "refactor": "Refactor Agent",
             "translate_out": "Translate from Python",
-            "done": END,
+            "done": "Report Agent",
         },
     )
 
 
-    graph.add_edge("Translate from Python", END)
+    graph.add_edge("Translate from Python", "Report Agent")
+
+    graph.add_edge("Report Agent", END)
 
     return graph.compile()

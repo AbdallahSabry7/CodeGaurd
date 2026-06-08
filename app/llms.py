@@ -40,4 +40,10 @@ architect_llm = ChatOpenAI(
     },
 )
 
+report_llm = ChatGroq(
+	model=settings.model3,          
+	api_key=settings.GROQ_API_KEY,
+	temperature=0.2,
+)
+
 

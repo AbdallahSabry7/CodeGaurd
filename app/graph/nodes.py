@@ -227,3 +227,4 @@ def destroy_last_node(state: AgentState) -> dict:
         "refactored_code": state["refactored_code"][:-1],
         "quality_scores": state.get("quality_scores", [])[:-1],
     }
+

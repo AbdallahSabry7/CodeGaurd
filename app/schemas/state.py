@@ -30,3 +30,4 @@ class AgentState(TypedDict):
     test_driver: Optional[str]            
     regression_verdict: Optional[str]     
     regression_report: Optional[str]
+    final_report: str
