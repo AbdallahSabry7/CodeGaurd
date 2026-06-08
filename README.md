@@ -1,6 +1,7 @@
 # 🛡️ CodeGuard
 
 > Multi-agent Python code analysis and automated refactoring powered by LangGraph — with a lightweight black-box behavioral **regression check**.
+> 
 
 ## What is CodeGuard?
 
@@ -8,7 +9,7 @@ CodeGuard is an agentic pipeline that takes raw code, detects its language, anal
 
 ## Architecture
 
-CodeGuard is built on **LangGraph**. The pipeline combines **three core LLM agents** (Translator, Architect, Refactor), one **LLM-assisted Characterizer**, and several **deterministic plain-function nodes** — including a **Convergence controller** (which replaced the old LLM comparator) and a **Regression check** — wired together as a directed graph with conditional edges and a hard cap of `max_iterations` (default 3) refactor loops.
+CodeGuard is built on **LangGraph**. The pipeline combines **three core LLM agents** (Translator, Architect, Refactor), one **LLM-assisted Characterizer**, and several **deterministic plain-function nodes** — including a **Convergence controller** (which replaced the old LLM comparator) and a **Regression check** — wired together as a directed graph with conditional edges. Refactoring is bounded by two caps: `max_iterations` (default 3, hard cap on refactor attempts) and `max_improvement_loops` (default 3, convergence loop cap).
 
 ```mermaid
 flowchart TD
@@ -40,10 +41,13 @@ flowchart TD
 
 ### LLM agents + Characterizer
 
-- **Translator Agent** — converts Java/C++ → Python before analysis, and Python → the original language after refactoring. Runs only for non-Python input. (`model3`, Groq, temp 0.2)
+- **Translator Agent** — converts Java/C++ → Python before analysis, and Python → the original language after refactoring. Runs only for non-Python input. (`model1`, Groq, temp 0.2)
 - **Architect Agent** — runs after every analyzer pass. Consumes the raw analyzer report, validates its output against a Pydantic schema (with retries), classifies findings (SOLID / Clean Code / Complexity) with severity + confidence, and emits a numbered, severity-sorted list of refactor directives. The global verdict is recomputed in code, never trusted from the model. (`model4`, OpenRouter, temp 0.2)
-- **Refactor Agent** — rewrites code to satisfy the Architect's directives on the first pass, and on re-entry fixes only what the Syntax Check, Executor, or **Regression check** flagged (in that priority order). (`model1`, OpenRouter, temp 0.2)
+- **Refactor Agent** — rewrites code to satisfy the Architect's directives on the first pass, and on re-entry fixes only what the Syntax Check, Executor, or **Regression check** flagged (in that priority order). (`model1`, Groq, temp 0.1)
 - **Characterizer (LLM-assisted)** — runs once at ingestion. Reads the Python original, decides the behavioral boundary (`stdio` vs `api`), and designs a coverage-minded input suite. The LLM only **suggests** the inputs; running both versions on them and comparing observations happens later in the Regression check and is fully deterministic. (`model2`, Groq, temp 0.1)
+
+> A separate summary LLM (`report_llm`, `model3`, Groq, temp 0.2) is defined in `llms.py` for an optional final-report feature.
+> 
 
 ### Plain-function nodes (no LLM)
 
@@ -102,25 +106,33 @@ This replaces the old LLM Comparator with a reproducible, explainable stop condi
 | Node | Type | Model (default) | Provider | Temp |
 | --- | --- | --- | --- | --- |
 | Detect Language | Plain fn | — | — | — |
-| Translator | LLM | `model3` (llama-3.3-70b-versatile) | Groq | 0.2 |
-| Characterizer | LLM-assisted | `model2` (llama-4-scout-17b-16e-instruct) | Groq | 0.1 |
+| Translator | LLM | `model1` (openai/gpt-oss-120b) | Groq | 0.2 |
+| Characterizer | LLM-assisted | `model2` (llama-3.3-70b-versatile) | Groq | 0.1 |
 | Analyzer | Plain fn | — | — | — |
-| Architect | LLM | `model4` (set in .env) | OpenRouter | 0.2 |
-| Refactor | LLM | `model1` (openrouter/owl-alpha) | OpenRouter | 0.2 |
+| Architect | LLM | `model4` (openai/gpt-oss-120b:free) | OpenRouter | 0.2 |
+| Refactor | LLM | `model1` (openai/gpt-oss-120b) | Groq | 0.1 |
+| Report summary | LLM | `model3` (openai/gpt-oss-20b) | Groq | 0.2 |
 | Syntax Check | Plain fn | — | — | — |
 | Convergence Node | Plain fn | — | — | — |
 | Executor | Plain fn | — | — | — |
 | Regression check | Plain fn | — | — | — |
 
+<aside>
+💡
+
+The `openai/gpt-oss-*` models are open-weight models hosted on Groq, so `model1`–`model3` are Groq calls; only `model4` (Architect) goes through OpenRouter.
+
+</aside>
+
 ## Project Structure
 
-```text
-CodeGuard/
+```
+CodeGaurd/
 ├── app/
 │   ├── agents/
 │   │   ├── architect.py         # Architect Agent (LLM, OpenRouter)
 │   │   ├── characterizer.py     # Characterizer - suggests black-box input cases (LLM-assisted, Groq)
-│   │   ├── refactor.py          # Refactor Agent (LLM, OpenRouter)
+│   │   ├── refactor.py          # Refactor Agent (LLM, Groq)
 │   │   └── translator.py        # Translator Agent (LLM, Groq)
 │   ├── graph/
 │   │   ├── __init__.py          # exposes build_graph
@@ -135,6 +147,7 @@ CodeGuard/
 │   │   ├── refactor_prompt.py
 │   │   └── translator_prompt.py
 │   ├── schemas/
+│   │   ├── characterization.py  # CharacterizationSpec (Pydantic) for the Characterizer
 │   │   └── state.py             # AgentState TypedDict (+ quality_scores, test_inputs, test_mode, test_driver, regression_verdict, regression_report)
 │   ├── services/
 │   │   ├── complexity.py
@@ -166,8 +179,8 @@ CodeGuard/
 ## Installation
 
 ```bash
-git clone https://github.com/AbdallahSabry7/CodeGuard.git
-cd CodeGuard/app
+git clone https://github.com/AbdallahSabry7/CodeGaurd.git
+cd CodeGaurd/app
 python -m venv venv
 # Windows
 venv\Scripts\activate
@@ -192,13 +205,13 @@ LANGCHAIN_TRACING_V2=true
 LANGCHAIN_ENDPOINT=https://api.smith.langchain.com
 LANGCHAIN_PROJECT=CodeGuard
 
-# Groq models
-model2=meta-llama/llama-4-scout-17b-16e-instruct   # Characterizer
-model3=llama-3.3-70b-versatile                     # Translator
+# Groq models (required)
+model1=openai/gpt-oss-120b         # Translator + Refactor
+model2=llama-3.3-70b-versatile     # Characterizer
+model3=openai/gpt-oss-20b          # Report summarizer (report_llm)
 
-# OpenRouter models
-model1=openrouter/owl-alpha                        # Refactor
-model4=                                            # Architect (required - set an OpenRouter model)
+# OpenRouter model (Architect - set this; defaults to empty)
+model4=openai/gpt-oss-120b:free
 openai_api_base=https://openrouter.ai/api/v1
 
 # Loop controls
