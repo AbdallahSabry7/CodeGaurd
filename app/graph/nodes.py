@@ -6,17 +6,17 @@ import re
 
 
 def validate_translator_code(state: AgentState) -> dict:
-    iterations = state.get("refactor_iterations", 0)
-    code = (state.get("original_code_converted", "") if iterations == 0
-            else (state.get("refactored_code")[-1] if state.get("refactored_code") else ""))
-    try:
-        ast.parse(code)
-        return {"translator_syntax_error": None}
-    except SyntaxError as e:
-        return {
-            "translator_syntax_error": f"SyntaxError at line {e.lineno}: {e.msg}",
-            "syntax_iterations": state.get("syntax_iterations", 0) + 1,   
-        }
+	iterations = state.get("refactor_iterations", 0)
+	code = (state.get("original_code_converted", "") if iterations == 0
+			else (state.get("refactored_code")[-1] if state.get("refactored_code") else ""))
+	try:
+		ast.parse(code)
+		return {"translator_syntax_error": None}
+	except SyntaxError as e:
+		return {
+			"translator_syntax_error": f"SyntaxError at line {e.lineno}: {e.msg}",
+			"syntax_iterations": state.get("syntax_iterations", 0) + 1,   
+		}
 
 def validate_refactored_code(state: AgentState) -> dict:
     if state.get("refactored_code"):
@@ -203,21 +203,22 @@ def convergence_node(state: AgentState) -> dict:
     }
 
 def regression_check_node(state: AgentState) -> dict:
+	refactored = state["refactored_code"][-1] if state.get("refactored_code") else ""
+	if not refactored:
+		# Nothing was changed (or the only change was undone) → original is the answer.
+		return {"regression_verdict": "SAME", "regression_report": "No refactor to verify."}
 	original = state.get("original_code_converted") or state["original_code"]
 	cases = state.get("test_inputs") or []
 	if not cases:
 		print("[regression] WARNING: characterizer produced 0 cases — nothing to check")
 	result = differential_check(
 		original=original,
-		refactored=state["refactored_code"][-1] if state.get("refactored_code") else "",
+		refactored=refactored,
 		cases=cases,
 		mode=state.get("test_mode", "stdio"),
 		driver=state.get("test_driver", ""),
 	)
-	return {
-		"regression_verdict": result.verdict,
-		"regression_report": result.report,
-	}
+	return {"regression_verdict": result.verdict, "regression_report": result.report}
 
 def destroy_last_node(state: AgentState) -> dict:
     if not state.get("refactored_code"):

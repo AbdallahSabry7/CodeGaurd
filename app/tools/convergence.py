@@ -92,14 +92,14 @@ class ConvergenceController:
     min_gain: float = settings.min_gain
 
     def decide(self, *, history: list[float],
-            loops: int) -> Literal["continue", "finalize"]:
+		    loops: int) -> Literal["continue", "finalize", "finalize and destroy last refactor"]:
         latest = history[-1]
-        if latest == 0.0:                      
+        if latest == 0.0:
             return "finalize"
-        if loops >= self.max_improvement_loops:  
+        if loops >= self.max_improvement_loops:
             return "finalize"
         if len(history) >= 2 and (history[-2] - history[-1]) < self.min_gain:
             if history[-1] > history[-2]:
-                return "finalize and destroy last refactor" 
-                    
+                return "finalize and destroy last refactor"   
+            return "finalize"                                 
         return "continue"
