@@ -166,7 +166,7 @@ def code_block(content, is_error=False):
     cls = "cg-code error-box" if is_error else "cg-code"
     if not content:
         return '<div class="cg-code"><span class="cg-placeholder">Will appear here once the run finishes…</span></div>'
-    return f'<div class="{cls}">{html.escape(str(content))}</div>'
+    return f'<pre class="{cls}">{html.escape(str(content))}</pre>'
 
 STAGES = {
     "analyzer":   ("Scanning structure", "static analysis"),

@@ -35,12 +35,12 @@ Dataset size: 8
 
 | Principle | Precision | Recall | F1 |
 | --- | --- | --- | --- |
-| SRP | 33.3% | 100.0% | 50.0% |
-| OCP | 20.0% | 100.0% | 33.3% |
-| LSP | 25.0% | 100.0% | 40.0% |
-| ISP | 20.0% | 100.0% | 33.3% |
-| DIP | 33.3% | 100.0% | 50.0% |
-| **macro** | 26.3% | 100.0% | 41.3% |
+| SRP | 40.0% | 100.0% | 57.1% |
+| OCP | 33.3% | 100.0% | 50.0% |
+| LSP | 50.0% | 100.0% | 66.7% |
+| ISP | 33.3% | 100.0% | 50.0% |
+| DIP | 100.0% | 100.0% | 100.0% |
+| **macro** | 51.3% | 100.0% | 64.8% |
 
 ### CodeGuard (AST detectors)
 
@@ -80,4 +80,25 @@ Dataset size: 6
 | duplicated_code | 0.0% | 0.0% | 0.0% |
 | magic_number | 100.0% | 100.0% | 100.0% |
 | **macro** | 50.0% | 50.0% | 50.0% |
+
+## Refactoring (behavior preservation)
+
+Dataset size: 3 snippets
+
+| System | Test-pass rate | Behavior-preserved rate | Gate-blocked rate |
+| --- | --- | --- | --- |
+| Raw LLM (no verification) | 100.0% | 100.0% | — |
+| CodeGuard (full + gate) | 100.0% | 100.0% | 0.0% |
+
+_Behavior-preserved = refactored output matches the original on every checked input._
+
+## Ablation — contribution of each layer
+
+| Configuration | SOLID macro-F1 | Smell macro-F1 | Complexity exact-acc | Refactor behavior-preserved |
+| --- | --- | --- | --- | --- |
+| 1. LLM-only | 64.8% | 72.2% | 100.0% | 100.0% |
+| 2. LLM + AST | 89.3% | 50.0% | 0.0% | 100.0% |
+| 3. LLM + AST + gate (full) | 89.3% | 50.0% | 0.0% | 100.0% |
+
+_Rows 2→3 isolate the verification gate; rows 1→2 isolate the AST detectors._
 

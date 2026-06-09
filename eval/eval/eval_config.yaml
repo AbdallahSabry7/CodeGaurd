@@ -1,0 +1,22 @@
+# CodeGuard evaluation harness configuration.
+# Most settings are also overridable via environment variables (shown in []).
+
+baseline_llm:
+  # Provider auto-detected from env keys [OPENROUTER_API_KEY] / [GROQ_API_KEY].
+  model: "openai/gpt-oss-120b"   # [BASELINE_MODEL] raw-LLM baseline model
+  require_real: false             # [CODEGUARD_EVAL_REQUIRE_LLM=1] fail if no key
+  chain_of_thought: false         # [BASELINE_COT=1] fair CoT baseline (reason then extract)
+
+codeguard:
+  app_dir: "../app"               # [CODEGUARD_APP_DIR] folder with services/ graph/ tools/
+
+oracle:
+  generated_inputs: 30            # extra inputs per snippet for the differential gate
+  ground_truth_inputs: 120        # larger budget used as the safety ground truth
+  timeout_seconds: 5              # per-execution wall-clock timeout (isolated subprocess)
+
+datasets:
+  complexity: "datasets/complexity.jsonl"
+  solid: "datasets/solid.jsonl"
+  smells: "datasets/smells.jsonl"
+  refactor: "datasets/refactor.jsonl"
