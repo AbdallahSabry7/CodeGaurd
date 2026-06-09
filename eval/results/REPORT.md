@@ -35,12 +35,12 @@ Dataset size: 8
 
 | Principle | Precision | Recall | F1 |
 | --- | --- | --- | --- |
-| SRP | 40.0% | 100.0% | 57.1% |
-| OCP | 25.0% | 100.0% | 40.0% |
-| LSP | 33.3% | 100.0% | 50.0% |
-| ISP | 33.3% | 100.0% | 50.0% |
-| DIP | 40.0% | 100.0% | 57.1% |
-| **macro** | 34.3% | 100.0% | 50.9% |
+| SRP | 33.3% | 100.0% | 50.0% |
+| OCP | 20.0% | 100.0% | 33.3% |
+| LSP | 25.0% | 100.0% | 40.0% |
+| ISP | 20.0% | 100.0% | 33.3% |
+| DIP | 33.3% | 100.0% | 50.0% |
+| **macro** | 26.3% | 100.0% | 41.3% |
 
 ### CodeGuard (AST detectors)
 
@@ -66,8 +66,8 @@ Dataset size: 6
 | god_class | 0.0% | 0.0% | 0.0% |
 | dead_code | 100.0% | 100.0% | 100.0% |
 | duplicated_code | 50.0% | 100.0% | 66.7% |
-| magic_number | 33.3% | 100.0% | 50.0% |
-| **macro** | 63.9% | 83.3% | 69.4% |
+| magic_number | 50.0% | 100.0% | 66.7% |
+| **macro** | 66.7% | 83.3% | 72.2% |
 
 ### CodeGuard
 
@@ -80,25 +80,4 @@ Dataset size: 6
 | duplicated_code | 0.0% | 0.0% | 0.0% |
 | magic_number | 100.0% | 100.0% | 100.0% |
 | **macro** | 50.0% | 50.0% | 50.0% |
-
-## Refactoring (behavior preservation)
-
-Dataset size: 3 snippets
-
-| System | Test-pass rate | Behavior-preserved rate | Gate-blocked rate |
-| --- | --- | --- | --- |
-| Raw LLM (no verification) | 100.0% | 100.0% | — |
-| CodeGuard (full + gate) | 100.0% | 100.0% | 0.0% |
-
-_Behavior-preserved = refactored output matches the original on every checked input._
-
-## Ablation — contribution of each layer
-
-| Configuration | SOLID macro-F1 | Smell macro-F1 | Complexity exact-acc | Refactor behavior-preserved |
-| --- | --- | --- | --- | --- |
-| 1. LLM-only | 50.9% | 69.4% | 100.0% | 100.0% |
-| 2. LLM + AST | 89.3% | 50.0% | 0.0% | 100.0% |
-| 3. LLM + AST + gate (full) | 89.3% | 50.0% | 0.0% | 100.0% |
-
-_Rows 2→3 isolate the verification gate; rows 1→2 isolate the AST detectors._
 
