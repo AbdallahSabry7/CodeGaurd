@@ -1,0 +1,153 @@
+{
+  "detect": {
+    "available": false
+  },
+  "complexity": {
+    "n": 8,
+    "baseline": {
+      "exact": 0.625,
+      "within_one_tier": 0.875,
+      "n": 8
+    },
+    "codeguard": null
+  },
+  "solid": {
+    "n": 8,
+    "baseline": {
+      "per_label": {
+        "SRP": {
+          "precision": 0.6666666666666666,
+          "recall": 1.0,
+          "f1": 0.8,
+          "tp": 2,
+          "fp": 1,
+          "fn": 0
+        },
+        "OCP": {
+          "precision": 0.0,
+          "recall": 0.0,
+          "f1": 0.0,
+          "tp": 0,
+          "fp": 0,
+          "fn": 1
+        },
+        "LSP": {
+          "precision": 0.0,
+          "recall": 0.0,
+          "f1": 0.0,
+          "tp": 0,
+          "fp": 0,
+          "fn": 1
+        },
+        "ISP": {
+          "precision": 0.0,
+          "recall": 0.0,
+          "f1": 0.0,
+          "tp": 0,
+          "fp": 0,
+          "fn": 1
+        },
+        "DIP": {
+          "precision": 0.0,
+          "recall": 0.0,
+          "f1": 0.0,
+          "tp": 0,
+          "fp": 0,
+          "fn": 2
+        }
+      },
+      "macro": {
+        "precision": 0.13333333333333333,
+        "recall": 0.2,
+        "f1": 0.16
+      },
+      "micro": {
+        "precision": 0.6666666666666666,
+        "recall": 0.2857142857142857,
+        "f1": 0.4,
+        "tp": 2,
+        "fp": 1,
+        "fn": 5
+      }
+    },
+    "codeguard": null
+  },
+  "clean_code": {
+    "n": 6,
+    "baseline": {
+      "per_label": {
+        "long_method": {
+          "precision": 0.0,
+          "recall": 0.0,
+          "f1": 0.0,
+          "tp": 0,
+          "fp": 0,
+          "fn": 1
+        },
+        "long_parameter_list": {
+          "precision": 0.0,
+          "recall": 0.0,
+          "f1": 0.0,
+          "tp": 0,
+          "fp": 0,
+          "fn": 1
+        },
+        "god_class": {
+          "precision": 0.0,
+          "recall": 0.0,
+          "f1": 0.0,
+          "tp": 0,
+          "fp": 0,
+          "fn": 0
+        },
+        "dead_code": {
+          "precision": 0.0,
+          "recall": 0.0,
+          "f1": 0.0,
+          "tp": 0,
+          "fp": 0,
+          "fn": 1
+        },
+        "duplicated_code": {
+          "precision": 0.0,
+          "recall": 0.0,
+          "f1": 0.0,
+          "tp": 0,
+          "fp": 0,
+          "fn": 1
+        },
+        "magic_number": {
+          "precision": 0.0,
+          "recall": 0.0,
+          "f1": 0.0,
+          "tp": 0,
+          "fp": 0,
+          "fn": 1
+        }
+      },
+      "macro": {
+        "precision": 0.0,
+        "recall": 0.0,
+        "f1": 0.0
+      },
+      "micro": {
+        "precision": 0.0,
+        "recall": 0.0,
+        "f1": 0.0,
+        "tp": 0,
+        "fp": 0,
+        "fn": 5
+      }
+    },
+    "codeguard": null
+  },
+  "refactor": {
+    "baseline": {
+      "n": 3,
+      "test_pass_rate": 1.0,
+      "behavior_preserved_rate": 1.0,
+      "gate_blocked_rate": null
+    },
+    "codeguard": null
+  }
+}

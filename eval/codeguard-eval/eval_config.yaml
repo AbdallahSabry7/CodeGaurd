@@ -1,0 +1,22 @@
+# CodeGuard evaluation harness configuration.
+# Most settings are also overridable via environment variables (shown in []).
+
+baseline_llm:
+  # Provider auto-detected from env keys [OPENROUTER_API_KEY] / [GROQ_API_KEY].
+  model: "openai/gpt-oss-120b"   # [BASELINE_MODEL] raw-LLM baseline model
+  require_real: false            # [CODEGUARD_EVAL_REQUIRE_LLM=1] fail if no key
+
+codeguard:
+  app_dir: "../app"              # [CODEGUARD_APP_DIR] folder with tools/ graph/ agents/
+
+datasets:
+  complexity: "datasets/complexity.jsonl"
+  solid: "datasets/solid.jsonl"
+  smells: "datasets/smells.jsonl"
+  refactor: "datasets/refactor.jsonl"
+
+# Where to scale up to full datasets later (see README -> Scaling up):
+#   complexity -> CodeComplex / CoRCoD
+#   solid      -> "Are We SOLID Yet?" benchmark
+#   smells     -> public code-smell datasets
+#   refactor   -> ClassEval + your held-out snippets with tests

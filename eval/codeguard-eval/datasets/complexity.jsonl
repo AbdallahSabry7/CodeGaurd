@@ -1,0 +1,10 @@
+# Mini complexity dataset. label = dominant worst-case time complexity.
+# Expand with CodeComplex / CoRCoD (see README). One JSON object per line.
+{"id": "c1", "label": "O(1)", "code": "def get_first(xs):\n    return xs[0] if xs else None"}
+{"id": "c2", "label": "O(n)", "code": "def total(xs):\n    s = 0\n    for x in xs:\n        s += x\n    return s"}
+{"id": "c3", "label": "O(n^2)", "code": "def has_dup(xs):\n    for i in range(len(xs)):\n        for j in range(i+1, len(xs)):\n            if xs[i] == xs[j]:\n                return True\n    return False"}
+{"id": "c4", "label": "O(log n)", "code": "def bsearch(xs, t):\n    lo, hi = 0, len(xs)-1\n    while lo <= hi:\n        mid = (lo+hi)//2\n        if xs[mid] == t:\n            return mid\n        if xs[mid] < t:\n            lo = mid+1\n        else:\n            hi = mid-1\n    return -1"}
+{"id": "c5", "label": "O(n log n)", "code": "def sorted_copy(xs):\n    return sorted(xs)"}
+{"id": "c6", "label": "O(2^n)", "code": "def fib(n):\n    if n < 2:\n        return n\n    return fib(n-1) + fib(n-2)"}
+{"id": "c7", "label": "O(n)", "code": "def count_vowels(s):\n    return sum(1 for ch in s if ch in 'aeiou')"}
+{"id": "c8", "label": "O(n^3)", "code": "def trips(xs):\n    out = []\n    for i in range(len(xs)):\n        for j in range(len(xs)):\n            for k in range(len(xs)):\n                out.append((xs[i], xs[j], xs[k]))\n    return out"}
