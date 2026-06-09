@@ -360,9 +360,6 @@ class LSPDetector(ast.NodeVisitor):
         self._violations: list[Violation] = []
         self._seen: set[tuple[int, str]] = set()
 
-    # ------------------------------------------------------------------
-    # Pass 1 — collection
-    # ------------------------------------------------------------------
 
     def visit_ClassDef(self, node: ast.ClassDef) -> None:
         self._classes[node.name] = node
@@ -377,9 +374,6 @@ class LSPDetector(ast.NodeVisitor):
             self._abstract_classes.add(node.name)
         self.generic_visit(node)
 
-    # ------------------------------------------------------------------
-    # Pass 2 — analysis
-    # ------------------------------------------------------------------
 
     def analyze(self) -> list[Violation]:
         checker = TypeChecker(self._inheritance)
@@ -390,11 +384,7 @@ class LSPDetector(ast.NodeVisitor):
                 for m in cls_node.body
                 if isinstance(m, (ast.FunctionDef, ast.AsyncFunctionDef))
             }
-            # FIX: removed the `checked` set that was suppressing violations
-            # for multi-level inheritance chains (A→B→C would skip B's
-            # violations when checking C against B's parent A).
-            # Instead, compare each child method against its DIRECT parent
-            # in the MRO that defines the method first.
+
             for parent_name in all_parents:
                 if parent_name not in self._classes:
                     continue
@@ -414,10 +404,6 @@ class LSPDetector(ast.NodeVisitor):
                             checker,
                         )
         return self._violations
-
-    # ------------------------------------------------------------------
-    # Internal helpers
-    # ------------------------------------------------------------------
 
     def _all_parents(self, cls: str, visited: set[str] | None = None) -> list[str]:
         """BFS order so the most direct parent is checked first."""
@@ -451,7 +437,6 @@ class LSPDetector(ast.NodeVisitor):
         parent_sig = extract_signature(parent)
         name = child.name
 
-        # --- Parameter count ---
         if len(child_sig.positional) != len(parent_sig.positional):
             self._add(
                 child,
@@ -461,7 +446,6 @@ class LSPDetector(ast.NodeVisitor):
                 Severity.HIGH,
             )
 
-        # --- Keyword-only parameters ---
         if child_sig.kwonly != parent_sig.kwonly:
             self._add(
                 child,
@@ -469,7 +453,6 @@ class LSPDetector(ast.NodeVisitor):
                 f"{parent_sig.kwonly!r} → {child_sig.kwonly!r}.",
             )
 
-        # FIX NEW: keyword-only parameter type annotation changes
         for kw_param, p_type in parent_sig.kwonly_annotations.items():
             c_type = child_sig.kwonly_annotations.get(kw_param)
             if c_type and c_type != p_type:
@@ -482,7 +465,6 @@ class LSPDetector(ast.NodeVisitor):
                         Severity.HIGH,
                     )
 
-        # --- Default removal ---
         if child_sig.n_defaults < parent_sig.n_defaults:
             self._add(
                 child,
@@ -490,8 +472,6 @@ class LSPDetector(ast.NodeVisitor):
                 f"that callers may rely on.",
             )
 
-        # FIX NEW: default value *changes* (not just count reduction).
-        # Align from the right (Python default alignment).
         if child_sig.n_defaults > 0 and parent_sig.n_defaults > 0:
             p_defs = parent_sig.default_values
             c_defs = child_sig.default_values
@@ -505,9 +485,8 @@ class LSPDetector(ast.NodeVisitor):
                         f"values ('{pd}' → '{cd}'), breaking callers that rely "
                         f"on the parent's defaults.",
                     )
-                    break  # one violation per method
+                    break  
 
-        # --- *args / **kwargs ---
         if child_sig.vararg != parent_sig.vararg:
             self._add(
                 child,
@@ -600,11 +579,6 @@ class LSPDetector(ast.NodeVisitor):
                     f"not raised by '{parent_cls}.{name}'.",
                 )
 
-        # FIX NEW: also flag new exceptions when parent IS abstract but the
-        # class hierarchy contract is defined (i.e. sibling overrides agree).
-        # This handles the common pattern: ABC defines the interface, one
-        # concrete impl raises something unexpected vs other impls.
-        # (Only fire when there are 2+ concrete siblings defining the method.)
         if parent_abstract:
             sibling_excs = self._sibling_exceptions(child_cls, name, child)
             own_excs = _direct_raises(child)
@@ -618,7 +592,6 @@ class LSPDetector(ast.NodeVisitor):
                         Severity.LOW,
                     )
 
-        # --- Method body is a single raise (removes all parent behavior) ---
         if (
             not parent_abstract
             and len(child.body) == 1
@@ -641,8 +614,6 @@ class LSPDetector(ast.NodeVisitor):
                 )
                 break
 
-        # FIX: extended type-guard check to cover ALL top-level if-blocks,
-        # not just the very first statement.
         if _has_early_return_guard(child, child_sig.positional):
             self._add(
                 child,
@@ -650,7 +621,6 @@ class LSPDetector(ast.NodeVisitor):
                 f"strengthening the parent's precondition.",
             )
 
-        # --- Parent returns a value; child never does ---
         parent_returns = any(
             isinstance(n, ast.Return) and n.value is not None
             for n in ast.walk(parent)
@@ -667,9 +637,6 @@ class LSPDetector(ast.NodeVisitor):
                 Severity.HIGH,
             )
 
-        # FIX NEW: concrete parent has super() call pattern while child
-        # silently drops it — may break cooperative multiple inheritance
-        # and parent post-conditions.
         if not parent_abstract and not _calls_super(child):
             # Only flag non-trivial overrides (more than just a docstring or pass)
             non_trivial = any(
@@ -689,9 +656,6 @@ class LSPDetector(ast.NodeVisitor):
                     Severity.MEDIUM,
                 )
 
-    # ------------------------------------------------------------------
-    # NEW helper: collect exception names from all sibling implementations
-    # ------------------------------------------------------------------
 
     def _sibling_exceptions(
         self, cls_name: str, method_name: str, skip_node: ast.FunctionDef

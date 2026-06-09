@@ -101,25 +101,13 @@ def _classify_domains(method_name: str) -> set[str]:
 
 
 def _classify_body_domains(func_node: ast.FunctionDef) -> set[str]:
-    """
-    Infer domains from the method *body*, not just its name.
 
-    Looks at:
-    - self.X.method() calls        → maps 'X' through COLLABORATOR_NOUN_DOMAINS
-    - self.X.Y.method() chains     → FIX: 3-level chain support
-    - standalone verb/builtin calls → maps through SEMANTIC_DOMAINS
-    - self.X assignments           → maps 'X' through NOUN_DOMAINS
-    - local alias tracking         → FIX C: conn = self.db; conn.query()
-    - self.attr comparisons        → FIX D: type-dispatch if/elif detection
-    """
     domains: set[str] = set()
 
-    # FIX C: Track local aliases — conn = self.db → conn maps to persistence
     local_aliases: dict[str, set[str]] = {}
 
     for node in ast.walk(func_node):
 
-        # FIX C: x = self.collaborator  →  remember x's domain
         if (
             isinstance(node, ast.Assign)
             and isinstance(node.value, ast.Attribute)
@@ -156,8 +144,6 @@ def _classify_body_domains(func_node: ast.FunctionDef) -> set[str]:
                 for domain, keywords in SEMANTIC_DOMAINS.items():
                     if method in keywords:
                         domains.add(domain)
-
-        # FIX: self.X.Y.method() — 3-level chain (e.g. self.service.client.post())
         elif (
             isinstance(node, ast.Call)
             and isinstance(node.func, ast.Attribute)
@@ -181,7 +167,6 @@ def _classify_body_domains(func_node: ast.FunctionDef) -> set[str]:
             and isinstance(node.func, ast.Name)
         ):
             fname = node.func.id.lower()
-            # FIX A: catch builtin open() as persistence signal
             if fname in {"open", "openfile"}:
                 domains.add("persistence")
             tokens = set(_tokenize_name(fname))
@@ -189,11 +174,9 @@ def _classify_body_domains(func_node: ast.FunctionDef) -> set[str]:
                 if tokens & keywords:
                     domains.add(domain)
 
-            # FIX C: alias.method() — look up alias in local_aliases
             if fname in local_aliases:
                 domains |= local_aliases[fname]
 
-        # FIX C: alias.method() on Attribute calls too
         elif (
             isinstance(node, ast.Call)
             and isinstance(node.func, ast.Attribute)
@@ -216,9 +199,6 @@ def _classify_body_domains(func_node: ast.FunctionDef) -> set[str]:
                         if attr_tokens & keywords:
                             domains.add(domain)
 
-    # FIX D: Type-dispatch detection — if/elif chains comparing self.attr to
-    # literals (self.type == 0, self.mode == "db") signal a class doing multiple
-    # things hidden behind a flag. Count as a synthetic "__dispatch__" domain.
     self_compares = sum(
         1 for n in ast.walk(func_node)
         if isinstance(n, ast.Compare)
@@ -542,10 +522,6 @@ class SRPAnalyzerEnhanced(ast.NodeVisitor):
 
         w = self.weights
 
-        # FIX E: Single-method classes — bypass weighted scoring entirely.
-        # The weighted model assumes multiple methods; with one method only
-        # LCOM and obj_diversity are structurally 0 regardless of content.
-        # Instead, score directly from how many domains the body touches.
         if n_methods == 1:
             solo_domains = {
                 d for d in methods_info[0]["body_domains"] if d != "other"
@@ -639,7 +615,6 @@ def get_srp_report(code: str, weights: dict | None = None) -> list[dict]:
         analyzer = SRPAnalyzerEnhanced(weights=weights)
         analyzer.visit(tree)
 
-        # Handle the case where the file has no classes at all
         if not analyzer.report:
             return [{
                 "status":     "Pass",
@@ -651,7 +626,6 @@ def get_srp_report(code: str, weights: dict | None = None) -> list[dict]:
         for class_name, data in analyzer.report.items():
             status = data["status"]
             
-            # Skip adding to results if the class passed
             if status not in ("Violation", "Review"):
                 continue
 
@@ -699,7 +673,6 @@ def get_srp_report(code: str, weights: dict | None = None) -> list[dict]:
                     f"({note} — {'penalty applied' if cross else 'penalty reduced'})"
                 )
 
-            # Format the final reason string
             reason_str     = "; ".join(fired) if fired else "multiple heuristics fired"
             threshold_note = f" (threshold: {diag.get('adaptive_threshold', 18)}%)"
 
@@ -721,7 +694,6 @@ def get_srp_report(code: str, weights: dict | None = None) -> list[dict]:
                 "reason":     reason_msg,
             })
 
-        # If we went through all classes and found nothing wrong, return a single pass
         if not results:
             return [{
                 "status":     "Pass",

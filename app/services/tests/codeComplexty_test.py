@@ -20,7 +20,7 @@ from sklearn.metrics import classification_report, confusion_matrix, accuracy_sc
 
 # analyzer module (complexity.py) lives one directory above this script
 sys.path.append(str(Path(__file__).resolve().parent.parent))
-from complexity import analyze, estimate_complexity
+from complexity1 import analyze, estimate_complexity
 
 CODE_COL = "code"          # <-- column with the source code
 TRUE_COL = "true_time"     # <-- column with the gold label (straight quotes!)
@@ -130,8 +130,3 @@ def evaluate(df: pd.DataFrame, debug_csv: str = "predictions_debug.csv",
     return df
 
 
-if __name__ == "__main__":
-    # Example: load your dataset here, e.g.
-    #   df = pd.read_json("codecomplex.json")
-    #   evaluate(df)
-    print("Import this module and call evaluate(df), or wire up your loader above.")

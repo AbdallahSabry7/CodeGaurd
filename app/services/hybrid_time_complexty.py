@@ -1,29 +1,3 @@
-"""Hybrid time-complexity classifier.
-
-Idea: the hand-written analyzer is a strong *feature extractor*, not a final
-classifier. We feed its signal vector (loop depth, sort/halving/recursion/
-two-pointer flags, ...) + its own Big-O guess + cheap token counts into a
-gradient-boosted tree that LEARNS the residual structure the rules can't
-resolve (partition-of-input, amortized, bit-length loops, ...).
-
-Layout (same as eval_codecomplex.py):
-    repo/
-      complexity.py                 <- the analyzer module
-      <subdir>/eval_codecomplex.py
-      <subdir>/hybrid_model.py      <- this file
-
-Quickstart:
-    import pandas as pd
-    from hybrid_model import build_features, cross_validate, train_and_save, load_and_predict
-
-    df = ...                       # columns: 'code' and 'true_time'
-    X, y = build_features(df)
-    cross_validate(X, y)           # stratified 5-fold: accuracy + HC-Score
-    train_and_save(X, y, 'hybrid.joblib')
-    preds = load_and_predict('hybrid.joblib', df_new)   # df_new needs only 'code'
-
-Deps: scikit-learn, pandas, numpy, joblib (all ship with sklearn).
-"""
 import re
 import sys
 from pathlib import Path
@@ -39,8 +13,7 @@ import joblib
 
 # analyzer module (complexity.py) lives one directory above this script
 sys.path.append(str(Path(__file__).resolve().parent.parent))
-from complexity import analyze
-# reuse the exact mapping + HC-Score already used by your eval harness
+from complexity1 import analyze
 from services.tests.codeComplexty_test import (
     to_benchmark_class, COMPLEXITY_ORDER, _RANK, hc_score, CODE_COL, TRUE_COL,
 )
@@ -104,8 +77,7 @@ def _signal_features(code: str) -> dict:
         pred = to_benchmark_class(r.time_complexity)
     except Exception:
         pass
-    # the analyzer's OWN guess is the single strongest feature: pass it as both
-    # an ordinal rank and a one-hot so the tree can trust or override it.
+
     feats["analyzer_rank"] = _RANK.get(pred, -1)
     for c in COMPLEXITY_ORDER:
         feats["analyzer_is_" + c] = int(pred == c)
@@ -125,9 +97,6 @@ def build_features(df: pd.DataFrame, code_col: str = None, label_col: str = None
     return X, y
 
 
-# --------------------------------------------------------------------------
-# Model
-# --------------------------------------------------------------------------
 def make_model() -> HistGradientBoostingClassifier:
     return HistGradientBoostingClassifier(
         max_iter=500,
@@ -149,28 +118,48 @@ def train_and_save(X, y, path: str = "hybrid.joblib"):
     return clf
 
 
-def load_and_predict(path: str, df: pd.DataFrame, code_col: str = None):
+def load_and_predict(path: str, df, code_col: str = None):
     bundle = joblib.load(path)
     clf, cols = bundle["model"], bundle["columns"]
+
+    if isinstance(df, str):
+        df = pd.DataFrame({code_col or "code": [df]})
+
+    elif isinstance(df, list):
+        df = pd.DataFrame({code_col or "code": df})
+
+    elif isinstance(df, pd.Series):
+        df = df.to_frame(name=code_col or "code")
+
+    elif not isinstance(df, pd.DataFrame):
+        raise TypeError(
+            "df must be a DataFrame, string, list of strings, or pandas Series"
+        )
+
+    code_col = code_col or "code"
+    if code_col not in df.columns:
+        raise ValueError(f"Missing required column: '{code_col}'")
+
     X, _ = build_features(df, code_col=code_col, label_col="__none__")
-    X = X.reindex(columns=cols, fill_value=0.0)   # align to training columns
+    X = X.reindex(columns=cols, fill_value=0.0)
+
     return clf.predict(X)
 
 
-def feature_importance(clf, X, y, n_repeats: int = 5, top: int = 25):
-    """Permutation importance (compute on a held-out split for honest numbers)."""
-    from sklearn.inspection import permutation_importance
-    r = permutation_importance(clf, X, y, n_repeats=n_repeats,
-                                random_state=0, n_jobs=-1)
-    order = np.argsort(r.importances_mean)[::-1]
-    print("top features by permutation importance:")
-    for i in order[:top]:
-        print(f"  {r.importances_mean[i]:+.4f}  {X.columns[i]}")
-    return [(X.columns[i], r.importances_mean[i]) for i in order]
+# def feature_importance(clf, X, y, n_repeats: int = 5, top: int = 25):
+#     """Permutation importance (compute on a held-out split for honest numbers)."""
+#     from sklearn.inspection import permutation_importance
+#     r = permutation_importance(clf, X, y, n_repeats=n_repeats,
+#                                 random_state=0, n_jobs=-1)
+#     order = np.argsort(r.importances_mean)[::-1]
+#     print("top features by permutation importance:")
+#     for i in order[:top]:
+#         print(f"  {r.importances_mean[i]:+.4f}  {X.columns[i]}")
+#     return [(X.columns[i], r.importances_mean[i]) for i in order]
 
 
-if __name__ == "__main__":
-    print("Import this module:")
-    print("  X, y = build_features(df)")
-    print("  cross_validate(X, y)")
-    print("  train_and_save(X, y, 'hybrid.joblib')")
+# if __name__ == "__main__":
+#     print("Import this module:")
+#     print("  X, y = build_features(df)")
+#     print("  cross_validate(X, y)")
+#     print("  train_and_save(X, y, 'hybrid.joblib')")

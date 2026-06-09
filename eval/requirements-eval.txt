@@ -1,0 +1,4 @@
+# The harness core uses only the Python standard library (urllib, json, ast).
+# These are optional niceties for scaling up; nothing here is needed for run_all.py.
+PyYAML>=6.0        # only if you parse eval_config.yaml yourself
+datasets>=2.0      # only for pulling HF benchmarks (CodeComplex etc.)
