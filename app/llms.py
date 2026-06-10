@@ -29,13 +29,17 @@ characterize_structured = characterize_llm.with_structured_output(
     CharacterizationSpec, method="json_mode", include_raw=True
 )
 
+_OPENAI_BASE = getattr(settings, "openai_api_base", None) or os.getenv(
+    "openai_api_base", "https://openrouter.ai/api/v1"
+)
+
 architect_llm = ChatOpenAI(
-    model= settings.model4,
+    model=settings.model4 or "openai/gpt-oss-120b:free",
     openai_api_key=settings.OPENROUTER_API_KEY,
-    openai_api_base=settings.openai_api_base,
+    openai_api_base=_OPENAI_BASE,
     temperature=0.2,
     default_headers={
-        "HTTP-Referer": "http://localhost:3000", 
+        "HTTP-Referer": "http://localhost:3000",
         "X-Title": "CodeGuard",
     },
 )

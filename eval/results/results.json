@@ -1,6 +1,7 @@
 {
   "detect": {
-    "available": false
+    "available": true,
+    "accuracy": 1.0
   },
   "complexity": {
     "n": 8,
@@ -37,11 +38,11 @@
           "support": 2
         },
         "OCP": {
-          "precision": 0.25,
+          "precision": 0.3333333333333333,
           "recall": 1.0,
-          "f1": 0.4,
+          "f1": 0.5,
           "tp": 1,
-          "fp": 3,
+          "fp": 2,
           "fn": 0,
           "support": 1
         },
@@ -64,33 +65,33 @@
           "support": 1
         },
         "DIP": {
-          "precision": 0.5,
+          "precision": 0.6666666666666666,
           "recall": 1.0,
-          "f1": 0.6666666666666666,
+          "f1": 0.8,
           "tp": 2,
-          "fp": 2,
+          "fp": 1,
           "fn": 0,
           "support": 2
         }
       },
       "macro": {
-        "precision": 0.4833333333333333,
+        "precision": 0.5333333333333333,
         "recall": 1.0,
-        "f1": 0.64,
+        "f1": 0.6866666666666668,
         "n_labels": 5
       },
       "macro_supported": {
-        "precision": 0.4833333333333333,
+        "precision": 0.5333333333333333,
         "recall": 1.0,
-        "f1": 0.64,
+        "f1": 0.6866666666666668,
         "n_labels": 5
       },
       "micro": {
-        "precision": 0.4666666666666667,
+        "precision": 0.5384615384615384,
         "recall": 1.0,
-        "f1": 0.6363636363636364,
+        "f1": 0.7000000000000001,
         "tp": 7,
-        "fp": 8,
+        "fp": 6,
         "fn": 0,
         "support": 7
       },
@@ -179,7 +180,83 @@
         "DIP"
       ]
     },
-    "codeguard_ast_architect": null
+    "codeguard_ast_architect": {
+      "per_label": {
+        "SRP": {
+          "precision": 1.0,
+          "recall": 0.5,
+          "f1": 0.6666666666666666,
+          "tp": 1,
+          "fp": 0,
+          "fn": 1,
+          "support": 2
+        },
+        "OCP": {
+          "precision": 1.0,
+          "recall": 1.0,
+          "f1": 1.0,
+          "tp": 1,
+          "fp": 0,
+          "fn": 0,
+          "support": 1
+        },
+        "LSP": {
+          "precision": 0.5,
+          "recall": 1.0,
+          "f1": 0.6666666666666666,
+          "tp": 1,
+          "fp": 1,
+          "fn": 0,
+          "support": 1
+        },
+        "ISP": {
+          "precision": 0.0,
+          "recall": 0.0,
+          "f1": 0.0,
+          "tp": 0,
+          "fp": 0,
+          "fn": 1,
+          "support": 1
+        },
+        "DIP": {
+          "precision": 0.6666666666666666,
+          "recall": 1.0,
+          "f1": 0.8,
+          "tp": 2,
+          "fp": 1,
+          "fn": 0,
+          "support": 2
+        }
+      },
+      "macro": {
+        "precision": 0.6333333333333333,
+        "recall": 0.7,
+        "f1": 0.6266666666666667,
+        "n_labels": 5
+      },
+      "macro_supported": {
+        "precision": 0.6333333333333333,
+        "recall": 0.7,
+        "f1": 0.6266666666666667,
+        "n_labels": 5
+      },
+      "micro": {
+        "precision": 0.7142857142857143,
+        "recall": 0.7142857142857143,
+        "f1": 0.7142857142857143,
+        "tp": 5,
+        "fp": 2,
+        "fn": 2,
+        "support": 7
+      },
+      "supported_labels": [
+        "SRP",
+        "OCP",
+        "LSP",
+        "ISP",
+        "DIP"
+      ]
+    }
   },
   "clean_code": {
     "n": 6,
@@ -297,7 +374,104 @@
         "magic_number"
       ]
     },
-    "codeguard_ast_architect": null
+    "codeguard_ast_architect": {
+      "per_label": {
+        "long_method": {
+          "precision": 0.0,
+          "recall": 0.0,
+          "f1": 0.0,
+          "tp": 0,
+          "fp": 0,
+          "fn": 1,
+          "support": 1
+        },
+        "long_parameter_list": {
+          "precision": 0.0,
+          "recall": 0.0,
+          "f1": 0.0,
+          "tp": 0,
+          "fp": 0,
+          "fn": 1,
+          "support": 1
+        },
+        "magic_number": {
+          "precision": 1.0,
+          "recall": 1.0,
+          "f1": 1.0,
+          "tp": 1,
+          "fp": 0,
+          "fn": 0,
+          "support": 1
+        }
+      },
+      "macro": {
+        "precision": 0.3333333333333333,
+        "recall": 0.3333333333333333,
+        "f1": 0.3333333333333333,
+        "n_labels": 3
+      },
+      "macro_supported": {
+        "precision": 0.3333333333333333,
+        "recall": 0.3333333333333333,
+        "f1": 0.3333333333333333,
+        "n_labels": 3
+      },
+      "micro": {
+        "precision": 1.0,
+        "recall": 0.3333333333333333,
+        "f1": 0.5,
+        "tp": 1,
+        "fp": 0,
+        "fn": 2,
+        "support": 3
+      },
+      "supported_labels": [
+        "long_method",
+        "long_parameter_list",
+        "magic_number"
+      ]
+    }
+  },
+  "clean_code_metrics": {
+    "n": 6,
+    "codeguard": {
+      "n": 6,
+      "avg_score": 73.0,
+      "median_score": 72.0,
+      "pass_rate": 0.5,
+      "grade_counts": {
+        "A": 0,
+        "B": 3,
+        "C": 3,
+        "D": 0,
+        "F": 0
+      },
+      "avg_E": 0.5,
+      "avg_W": 2.1666666666666665,
+      "avg_H": 11.5,
+      "avg_lloc": 11.166666666666666,
+      "median_lloc": 2.5,
+      "has_lloc": true
+    },
+    "baseline": {
+      "n": 6,
+      "avg_score": 66.5,
+      "median_score": 68.0,
+      "pass_rate": 0.5,
+      "grade_counts": {
+        "A": 1,
+        "B": 1,
+        "C": 1,
+        "D": 0,
+        "F": 3
+      },
+      "avg_E": 0.16666666666666666,
+      "avg_W": 2.5,
+      "avg_H": 0.8333333333333334,
+      "avg_lloc": 0.0,
+      "median_lloc": 0.0,
+      "has_lloc": false
+    }
   },
   "refactor": {
     "baseline": {
@@ -306,24 +480,11 @@
       "behavior_preserved_rate": 1.0,
       "gate_blocked_rate": null
     },
-    "codeguard": null
-  },
-  "clean_code_metrics": {
-    "n": 6,
-    "avg_score": 73.0,
-    "median_score": 72.0,
-    "pass_rate": 0.5,
-    "grade_counts": {
-      "A": 0,
-      "B": 3,
-      "C": 3,
-      "D": 0,
-      "F": 0
-    },
-    "avg_E": 0.5,
-    "avg_W": 2.1666666666666665,
-    "avg_H": 11.5,
-    "avg_lloc": 11.166666666666666,
-    "median_lloc": 2.5
+    "codeguard": {
+      "n": 3,
+      "test_pass_rate": 1.0,
+      "behavior_preserved_rate": 1.0,
+      "gate_blocked_rate": 0.0
+    }
   }
 }

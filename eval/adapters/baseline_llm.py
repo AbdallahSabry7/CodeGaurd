@@ -219,3 +219,69 @@ def _stub_multilabel(code: str, labels: list[str]) -> list[str]:
     if "long_method" in labels and len(code.splitlines()) > 25:
         out.append("long_method")
     return out
+
+def _grade_from_score(score: float) -> str:
+    if score >= 90:
+        return "A"
+    if score >= 80:
+        return "B"
+    if score >= 75:
+        return "C"
+    if score >= 60:
+        return "D"
+    return "F"
+
+
+def predict_clean_metrics(code: str) -> dict:
+    """Ask the raw LLM to grade clean-code quality in CodeGuard's shape.
+
+    Returns a dict shaped like services.analyze_code_string():
+    {score:int, grade:str, passed:bool, counts:"{E}E/{W}W/{H}H", lloc:None}
+    """
+    prompt = (
+        "You are a strict Python code-quality grader. Give a single overall "
+        "clean-code score from 0-100 (naming, function length, parameter count, "
+        "magic numbers, nesting, complexity, comments). Then count issues by "
+        "severity: E = errors/blockers, W = warnings, H = hints. "
+        'Return ONLY JSON, exactly like: {"score": 82, "counts": "1E/2W/3H"}. '
+        "No prose.\n\nCODE:\n" + code
+    )
+    try:
+        out = _chat([{"role": "user", "content": prompt}])
+        parsed = _extract_json(out) or {}
+        raw = parsed.get("score")
+        score = float(raw) if isinstance(raw, (int, float)) else 0.0
+        score = max(0.0, min(100.0, score))
+        counts = str(parsed.get("counts") or "0E/0W/0H")
+        return {
+            "score": score,
+            "grade": _grade_from_score(score),
+            "passed": score >= 75,
+            "counts": counts,
+            "lloc": None,  # the LLM does not measure logical lines of code
+        }
+    except (LLMUnavailable, urllib.error.URLError, KeyError):
+        if _require_real():
+            raise
+        return _stub_clean_metrics(code)
+
+
+def _stub_clean_metrics(code: str) -> dict:
+    """Offline heuristic so the harness still runs with no API key."""
+    lines = len(code.splitlines())
+    score = 90.0
+    e = w = h = 0
+    if lines > 25:
+        score -= 15.0
+        w += 1
+    if re.search(r"[^_\w]\d{2,}", code):  # crude magic-number signal
+        score -= 5.0
+        h += 1
+    score = max(0.0, min(100.0, score))
+    return {
+        "score": score,
+        "grade": _grade_from_score(score),
+        "passed": score >= 75,
+        "counts": f"{e}E/{w}W/{h}H",
+        "lloc": None,
+    }
