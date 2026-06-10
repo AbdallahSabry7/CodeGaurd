@@ -20,42 +20,42 @@ Accuracy: 100.0%
 
 ## Complexity (Big-O classification)
 
-Dataset size: 8
+Dataset size: 38
 
 | System | Exact-tier acc | Within-1-tier acc |
 | --- | --- | --- |
-| Raw LLM (baseline) | 100.0% | 100.0% |
-| CodeGuard (AST) | 0.0% | 0.0% |
+| Raw LLM (baseline) | 81.6% | 84.2% |
+| CodeGuard (AST) | 47.4% | 65.8% |
 
 ## SOLID violation detection
 
-Dataset size: 8
+Dataset size: 90
 
 ### Raw LLM (baseline)
 
 | Principle | Precision | Recall | F1 |
 | --- | --- | --- | --- |
-| SRP | 40.0% | 100.0% | 57.1% |
-| OCP | 33.3% | 100.0% | 50.0% |
-| LSP | 50.0% | 100.0% | 66.7% |
-| ISP | 33.3% | 100.0% | 50.0% |
-| DIP | 100.0% | 100.0% | 100.0% |
-| **macro** | 51.3% | 100.0% | 64.8% |
+| SRP | 37.3% | 100.0% | 54.3% |
+| OCP | 42.3% | 100.0% | 59.5% |
+| LSP | 83.3% | 92.6% | 87.7% |
+| ISP | 51.5% | 94.4% | 66.7% |
+| DIP | 60.4% | 96.7% | 74.4% |
+| **macro** | 55.0% | 96.7% | 68.5% |
 
 ### CodeGuard (AST detectors)
 
 | Principle | Precision | Recall | F1 |
 | --- | --- | --- | --- |
-| SRP | 100.0% | 50.0% | 66.7% |
-| OCP | 100.0% | 100.0% | 100.0% |
-| LSP | 100.0% | 100.0% | 100.0% |
-| ISP | 100.0% | 100.0% | 100.0% |
-| DIP | 66.7% | 100.0% | 80.0% |
-| **macro** | 93.3% | 90.0% | 89.3% |
+| SRP | 26.9% | 63.6% | 37.8% |
+| OCP | 66.7% | 81.8% | 73.5% |
+| LSP | 69.6% | 59.3% | 64.0% |
+| ISP | 42.3% | 61.1% | 50.0% |
+| DIP | 53.8% | 93.3% | 68.3% |
+| **macro** | 51.9% | 71.8% | 58.7% |
 
 ## Clean-code / smell detection
 
-Dataset size: 6
+Dataset size: 30
 
 ### Raw LLM (baseline)
 
@@ -63,11 +63,11 @@ Dataset size: 6
 | --- | --- | --- | --- |
 | long_method | 100.0% | 100.0% | 100.0% |
 | long_parameter_list | 100.0% | 100.0% | 100.0% |
-| god_class | 0.0% | 0.0% | 0.0% |
-| dead_code | 100.0% | 100.0% | 100.0% |
+| god_class | 100.0% | 100.0% | 100.0% |
+| dead_code | 87.5% | 100.0% | 93.3% |
 | duplicated_code | 50.0% | 100.0% | 66.7% |
-| magic_number | 50.0% | 100.0% | 66.7% |
-| **macro** | 66.7% | 83.3% | 72.2% |
+| magic_number | 64.3% | 100.0% | 78.3% |
+| **macro** | 83.6% | 100.0% | 89.7% |
 
 ### CodeGuard
 
@@ -78,17 +78,17 @@ Dataset size: 6
 | god_class | 0.0% | 0.0% | 0.0% |
 | dead_code | 0.0% | 0.0% | 0.0% |
 | duplicated_code | 0.0% | 0.0% | 0.0% |
-| magic_number | 100.0% | 100.0% | 100.0% |
-| **macro** | 50.0% | 50.0% | 50.0% |
+| magic_number | 90.0% | 100.0% | 94.7% |
+| **macro** | 48.3% | 50.0% | 49.1% |
 
 ## Refactoring (behavior preservation)
 
-Dataset size: 3 snippets
+Dataset size: 33 snippets
 
 | System | Test-pass rate | Behavior-preserved rate | Gate-blocked rate |
 | --- | --- | --- | --- |
-| Raw LLM (no verification) | 100.0% | 100.0% | — |
-| CodeGuard (full + gate) | 100.0% | 100.0% | 0.0% |
+| Raw LLM (no verification) | 78.9% | 78.8% | — |
+| CodeGuard (full + gate) | 97.8% | 97.0% | 0.0% |
 
 _Behavior-preserved = refactored output matches the original on every checked input._
 
@@ -96,9 +96,9 @@ _Behavior-preserved = refactored output matches the original on every checked in
 
 | Configuration | SOLID macro-F1 | Smell macro-F1 | Complexity exact-acc | Refactor behavior-preserved |
 | --- | --- | --- | --- | --- |
-| 1. LLM-only | 64.8% | 72.2% | 100.0% | 100.0% |
-| 2. LLM + AST | 89.3% | 50.0% | 0.0% | 100.0% |
-| 3. LLM + AST + gate (full) | 89.3% | 50.0% | 0.0% | 100.0% |
+| 1. LLM-only | 68.5% | 89.7% | 81.6% | 78.8% |
+| 2. LLM + AST | 58.7% | 49.1% | 47.4% | 78.8% |
+| 3. LLM + AST + gate (full) | 58.7% | 49.1% | 47.4% | 97.0% |
 
 _Rows 2→3 isolate the verification gate; rows 1→2 isolate the AST detectors._
 

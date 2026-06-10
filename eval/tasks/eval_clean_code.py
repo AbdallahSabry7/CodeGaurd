@@ -9,7 +9,7 @@ from harness import metrics
 from harness.io_utils import load_jsonl
 from harness.report import append_section, md_table, pct
 
-LABELS = ["long_method", "long_parameter_list", "god_class", "dead_code", "duplicated_code", "magic_number"]
+LABELS = ["long_method", "long_parameter_list", "magic_number"]
 
 
 def _table(name: str, scores: dict):

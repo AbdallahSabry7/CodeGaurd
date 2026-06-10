@@ -1,5 +1,3 @@
-# Mini complexity dataset. label = dominant worst-case time complexity.
-# Expand with CodeComplex / CoRCoD (see README). One JSON object per line.
 {"id": "c1", "label": "O(1)", "code": "def get_first(xs):\n    return xs[0] if xs else None"}
 {"id": "c2", "label": "O(n)", "code": "def total(xs):\n    s = 0\n    for x in xs:\n        s += x\n    return s"}
 {"id": "c3", "label": "O(n^2)", "code": "def has_dup(xs):\n    for i in range(len(xs)):\n        for j in range(i+1, len(xs)):\n            if xs[i] == xs[j]:\n                return True\n    return False"}
@@ -8,3 +6,33 @@
 {"id": "c6", "label": "O(2^n)", "code": "def fib(n):\n    if n < 2:\n        return n\n    return fib(n-1) + fib(n-2)"}
 {"id": "c7", "label": "O(n)", "code": "def count_vowels(s):\n    return sum(1 for ch in s if ch in 'aeiou')"}
 {"id": "c8", "label": "O(n^3)", "code": "def trips(xs):\n    out = []\n    for i in range(len(xs)):\n        for j in range(len(xs)):\n            for k in range(len(xs)):\n                out.append((xs[i], xs[j], xs[k]))\n    return out"}
+{"id": "c9", "label": "O(1)", "code": "def last(xs):\n    return xs[-1] if xs else None"}
+{"id": "c10", "label": "O(1)", "code": "def is_even(n):\n    return n % 2 == 0"}
+{"id": "c11", "label": "O(1)", "code": "def lookup(d, k):\n    return d.get(k)"}
+{"id": "c12", "label": "O(log n)", "code": "def count_halvings(n):\n    c = 0\n    while n > 1:\n        n //= 2\n        c += 1\n    return c"}
+{"id": "c13", "label": "O(log n)", "code": "def gcd(a, b):\n    while b:\n        a, b = b, a % b\n    return a"}
+{"id": "c14", "label": "O(log n)", "code": "def int_pow(base, exp):\n    result = 1\n    while exp > 0:\n        if exp & 1:\n            result *= base\n        base *= base\n        exp >>= 1\n    return result"}
+{"id": "c15", "label": "O(sqrt n)", "code": "def is_prime(n):\n    if n < 2:\n        return False\n    i = 2\n    while i * i <= n:\n        if n % i == 0:\n            return False\n        i += 1\n    return True"}
+{"id": "c16", "label": "O(n)", "code": "def maximum(xs):\n    m = xs[0]\n    for x in xs:\n        if x > m:\n            m = x\n    return m"}
+{"id": "c17", "label": "O(n)", "code": "def reverse(xs):\n    out = []\n    for x in xs:\n        out.insert(0, x)\n    return out"}
+{"id": "c18", "label": "O(n)", "code": "def index_of(xs, t):\n    for i, x in enumerate(xs):\n        if x == t:\n            return i\n    return -1"}
+{"id": "c19", "label": "O(n)", "code": "def factorial(n):\n    r = 1\n    for i in range(2, n + 1):\n        r *= i\n    return r"}
+{"id": "c20", "label": "O(n)", "code": "def fib_iter(n):\n    a, b = 0, 1\n    for _ in range(n):\n        a, b = b, a + b\n    return a"}
+{"id": "c21", "label": "O(n)", "code": "def dedup(xs):\n    seen = set()\n    out = []\n    for x in xs:\n        if x not in seen:\n            seen.add(x)\n            out.append(x)\n    return out"}
+{"id": "c22", "label": "O(n log n)", "code": "def merge_sort(xs):\n    if len(xs) <= 1:\n        return xs\n    mid = len(xs) // 2\n    left = merge_sort(xs[:mid])\n    right = merge_sort(xs[mid:])\n    out = []\n    i = j = 0\n    while i < len(left) and j < len(right):\n        if left[i] <= right[j]:\n            out.append(left[i]); i += 1\n        else:\n            out.append(right[j]); j += 1\n    out.extend(left[i:]); out.extend(right[j:])\n    return out"}
+{"id": "c23", "label": "O(n log n)", "code": "import heapq\ndef heap_sort(xs):\n    h = list(xs)\n    heapq.heapify(h)\n    return [heapq.heappop(h) for _ in range(len(h))]"}
+{"id": "c24", "label": "O(n log n)", "code": "def unique_sorted(xs):\n    return sorted(set(xs))"}
+{"id": "c25", "label": "O(n^2)", "code": "def bubble_sort(xs):\n    a = list(xs)\n    for i in range(len(a)):\n        for j in range(len(a) - 1 - i):\n            if a[j] > a[j+1]:\n                a[j], a[j+1] = a[j+1], a[j]\n    return a"}
+{"id": "c26", "label": "O(n^2)", "code": "def selection_sort(xs):\n    a = list(xs)\n    for i in range(len(a)):\n        m = i\n        for j in range(i+1, len(a)):\n            if a[j] < a[m]:\n                m = j\n        a[i], a[m] = a[m], a[i]\n    return a"}
+{"id": "c27", "label": "O(n^2)", "code": "def insertion_sort(xs):\n    a = list(xs)\n    for i in range(1, len(a)):\n        key = a[i]\n        j = i - 1\n        while j >= 0 and a[j] > key:\n            a[j+1] = a[j]\n            j -= 1\n        a[j+1] = key\n    return a"}
+{"id": "c28", "label": "O(n^2)", "code": "def all_pairs(xs):\n    out = []\n    for i in range(len(xs)):\n        for j in range(i+1, len(xs)):\n            out.append((xs[i], xs[j]))\n    return out"}
+{"id": "c29", "label": "O(n*m)", "code": "def common(xs, ys):\n    out = []\n    for x in xs:\n        for y in ys:\n            if x == y:\n                out.append(x)\n    return out"}
+{"id": "c30", "label": "O(n*m)", "code": "def matmul_vec(rows, cols):\n    out = []\n    for r in rows:\n        for c in cols:\n            out.append(r * c)\n    return out"}
+{"id": "c31", "label": "O(n^3)", "code": "def matmul(A, B):\n    n = len(A)\n    C = [[0]*n for _ in range(n)]\n    for i in range(n):\n        for j in range(n):\n            for k in range(n):\n                C[i][j] += A[i][k] * B[k][j]\n    return C"}
+{"id": "c32", "label": "O(n^3)", "code": "def count_triples(xs, target):\n    c = 0\n    n = len(xs)\n    for i in range(n):\n        for j in range(i+1, n):\n            for k in range(j+1, n):\n                if xs[i] + xs[j] + xs[k] == target:\n                    c += 1\n    return c"}
+{"id": "c33", "label": "O(2^n)", "code": "def power_set(xs):\n    if not xs:\n        return [[]]\n    rest = power_set(xs[1:])\n    return rest + [[xs[0]] + r for r in rest]"}
+{"id": "c34", "label": "O(2^n)", "code": "def subset_sum(xs, target):\n    if target == 0:\n        return True\n    if not xs or target < 0:\n        return False\n    return subset_sum(xs[1:], target - xs[0]) or subset_sum(xs[1:], target)"}
+{"id": "c35", "label": "O(2^n)", "code": "def count_paths(n):\n    if n <= 1:\n        return 1\n    return count_paths(n-1) + count_paths(n-2) + count_paths(n-3) if n >= 3 else count_paths(n-1) + count_paths(n-2)"}
+{"id": "c36", "label": "O(n!)", "code": "def permutations(xs):\n    if len(xs) <= 1:\n        return [xs]\n    out = []\n    for i in range(len(xs)):\n        rest = xs[:i] + xs[i+1:]\n        for p in permutations(rest):\n            out.append([xs[i]] + p)\n    return out"}
+{"id": "c37", "label": "O(n!)", "code": "def heaps_perm(a, k=None, out=None):\n    if out is None:\n        out, k = [], len(a)\n    if k == 1:\n        out.append(list(a))\n        return out\n    for i in range(k):\n        heaps_perm(a, k-1, out)\n        if k % 2 == 0:\n            a[i], a[k-1] = a[k-1], a[i]\n        else:\n            a[0], a[k-1] = a[k-1], a[0]\n    return out"}
+{"id": "c38", "label": "O(n)", "code": "def sum_digits(n):\n    s = 0\n    while n > 0:\n        s += n % 10\n        n //= 10\n    return s"}
