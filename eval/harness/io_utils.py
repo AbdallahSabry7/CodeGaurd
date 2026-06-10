@@ -1,4 +1,4 @@
-"""Small IO helpers: JSONL loading and results writing."""
+"""Small IO helpers: JSONL loading and results/log writing."""
 from __future__ import annotations
 
 import json
@@ -7,6 +7,7 @@ from typing import Iterator
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 RESULTS_DIR = os.path.join(ROOT, "results")
+LOGS_DIR = os.path.join(RESULTS_DIR, "logs")
 
 
 def load_jsonl(path: str) -> list[dict]:
@@ -26,6 +27,11 @@ def load_jsonl(path: str) -> list[dict]:
 def ensure_results_dir() -> str:
     os.makedirs(RESULTS_DIR, exist_ok=True)
     return RESULTS_DIR
+
+
+def ensure_logs_dir() -> str:
+    os.makedirs(LOGS_DIR, exist_ok=True)
+    return LOGS_DIR
 
 
 def write_json(name: str, obj) -> str:

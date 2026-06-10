@@ -373,7 +373,12 @@ def _check_comments(source: str) -> List[Issue]:
     return []
 
 
-def _run_pylint(source: str) -> list:
+def _run_pylint(source: str) -> tuple:
+    """Run pylint once and return (messages, score_out_of_10).
+
+    Uses a parseable message template so we can recover both the individual
+    findings AND the global 0-10 rating from a single invocation.
+    """
     try:
         with tempfile.NamedTemporaryFile(
             delete=False, suffix=".py", mode="w", encoding="utf-8"
@@ -383,28 +388,44 @@ def _run_pylint(source: str) -> list:
 
         proc = subprocess.run(
             [sys.executable, "-m", "pylint", path,
-             "--output-format=json", "--disable=all", "--enable=C,R,W",
-             "--disable=C0114,C0116,C0115"],
+             "--output-format=text", "--reports=n", "--score=y",
+             "--disable=all", "--enable=C,R,W",
+             "--disable=C0114,C0116,C0115",
+             "--msg-template={line}:::{symbol}:::{category}:::{msg}"],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
         )
         os.remove(path)
 
-        if proc.stdout:
-            seen, out = set(), []
-            for m in json.loads(proc.stdout):
-                key = (m.get("message-id"), m.get("line"))
+        messages, seen = [], set()
+        score = None
+        for raw in (proc.stdout or "").splitlines():
+            stripped = raw.strip()
+            if not stripped:
+                continue
+            m = re.search(r"rated at (-?\d+(?:\.\d+)?)/10", stripped)
+            if m:
+                score = float(m.group(1))
+                continue
+            parts = raw.split(":::", 3)
+            if len(parts) == 4:
+                ln_raw, symbol, category, msg = parts
+                try:
+                    ln = int(ln_raw.strip())
+                except ValueError:
+                    ln = None
+                key = (symbol.strip(), ln)
                 if key not in seen:
                     seen.add(key)
-                    out.append({
-                        "line":    m.get("line"),
-                        "symbol":  m.get("symbol"),
-                        "msg":     m.get("message"),
-                        "type":    m.get("type"),
+                    messages.append({
+                        "line":   ln,
+                        "symbol": symbol.strip(),
+                        "msg":    msg.strip(),
+                        "type":   category.strip(),
                     })
-            return out
+        return messages, score
     except Exception:
         pass
-    return []
+    return [], None
 
 
 # ── scoring ───────────────────────────────────────────────────────────────────
@@ -574,6 +595,7 @@ def analyze(source: str, verbose: bool = False) -> dict:
     h_count = sum(1 for i in sorted_issues if i.sev == "hint")
 
     if verbose:
+        pylint_msgs, pylint_score = _run_pylint(source)
         return {
             "score":         score,
             "grade":         grade,
@@ -588,8 +610,9 @@ def analyze(source: str, verbose: bool = False) -> dict:
                 "comments":              raw_comments,
                 "maintainability_index": round(mi, 1),
                 "cc_max":                cc_max,
+                "pylint_score":          pylint_score,
             },
-            "pylint":      _run_pylint(source),
+            "pylint":      pylint_msgs,
             "parse_error": None,
         }
 

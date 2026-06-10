@@ -1,10 +1,15 @@
-"""Clean-code / smell task: CodeGuard vs raw-LLM baseline.
+"""Clean-code / smell task: compare 3 systems.
+
+1) Raw-LLM baseline
+2) CodeGuard AST detectors (services/analyze_code_string)
+3) CodeGuard AST + Architect (architect_report.clean_code_violations)
 
 Metric: per-smell + macro precision/recall/F1.
 """
 from __future__ import annotations
 
 from adapters import baseline_llm, codeguard_adapter
+from adapters import codeguard_architect_adapter
 from harness import metrics
 from harness.io_utils import load_jsonl
 from harness.report import append_section, md_table, pct
@@ -25,20 +30,36 @@ def run() -> dict:
     data = load_jsonl("datasets/smells.jsonl")
     gold = [r["labels"] for r in data]
 
+    # 1) Raw LLM baseline
     base_pred = [baseline_llm.predict_smells(r["code"], LABELS) for r in data]
     base = metrics.multilabel_scores(base_pred, gold, LABELS)
-    result = {"n": len(data), "baseline": base}
 
     sections = ["## Clean-code / smell detection\n\n" + f"Dataset size: {len(data)}", _table("Raw LLM (baseline)", base)]
+    result = {"n": len(data), "baseline": base}
 
+    # 2) AST-only
     if codeguard_adapter.pipeline_available():
-        cg_pred = [codeguard_adapter.analyze(r["code"])["smells"] for r in data]
-        cg = metrics.multilabel_scores(cg_pred, gold, LABELS)
-        result["codeguard"] = cg
-        sections.append(_table("CodeGuard", cg))
+        ast_pred = [codeguard_adapter.analyze(r["code"])["smells"] for r in data]
+        ast_scores = metrics.multilabel_scores(ast_pred, gold, LABELS)
+        result["codeguard_ast"] = ast_scores
+        sections.append(_table("CodeGuard (AST detectors)", ast_scores))
     else:
-        result["codeguard"] = None
-        sections.append("### CodeGuard\n\nn/a — wire the adapter to enable.")
+        result["codeguard_ast"] = None
+        sections.append("### CodeGuard (AST detectors)\n\nn/a — wire adapters/codeguard_adapter.py")
+
+    # 3) AST + Architect
+    if codeguard_architect_adapter.pipeline_available():
+        arch_pred = [codeguard_architect_adapter.analyze_with_architect(r["code"])["smells"] for r in data]
+        arch_scores = metrics.multilabel_scores(arch_pred, gold, LABELS)
+        result["codeguard_ast_architect"] = arch_scores
+        sections.append(_table("CodeGuard (AST + Architect)", arch_scores))
+    else:
+        result["codeguard_ast_architect"] = None
+        sections.append(
+            "### CodeGuard (AST + Architect)\n\n"
+            "n/a — set CODEGUARD_APP_DIR and ensure OPENROUTER_API_KEY is available for Architect.\n\n"
+            f"Import error: `{codeguard_architect_adapter.import_error()}`"
+        )
 
     append_section("\n\n".join(sections))
     return result

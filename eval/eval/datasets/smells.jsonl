@@ -1,7 +1,0 @@
-# Mini code-smell dataset. labels among: long_method, long_parameter_list, god_class, dead_code, duplicated_code, magic_number
-{"id": "sm1", "labels": [], "code": "def add(a, b):\n    return a + b"}
-{"id": "sm2", "labels": ["long_parameter_list"], "code": "def make(a, b, c, d, e, f, g):\n    return (a, b, c, d, e, f, g)"}
-{"id": "sm3", "labels": ["dead_code"], "code": "def f(x):\n    return x * 2\n    print('never runs')"}
-{"id": "sm4", "labels": ["magic_number"], "code": "def price(n):\n    return n * 1.0825 + 4.99"}
-{"id": "sm5", "labels": ["duplicated_code"], "code": "def a(xs):\n    t = 0\n    for x in xs:\n        t += x\n    return t\n\ndef b(ys):\n    t = 0\n    for y in ys:\n        t += y\n    return t"}
-{"id": "sm6", "labels": ["long_method"], "code": "def handle(req):\n    acc = req\n    acc = acc + 1\n    acc = acc + 1\n    acc = acc + 1\n    acc = acc + 1\n    acc = acc + 1\n    acc = acc + 1\n    acc = acc + 1\n    acc = acc + 1\n    acc = acc + 1\n    acc = acc + 1\n    acc = acc + 1\n    acc = acc + 1\n    acc = acc + 1\n    acc = acc + 1\n    acc = acc + 1\n    acc = acc + 1\n    acc = acc + 1\n    acc = acc + 1\n    acc = acc + 1\n    acc = acc + 1\n    acc = acc + 1\n    acc = acc + 1\n    acc = acc + 1\n    acc = acc + 1\n    acc = acc + 1\n    acc = acc + 1\n    acc = acc + 1\n    acc = acc + 1\n    acc = acc + 1\n    acc = acc + 1\n    acc = acc + 1\n    return acc"}

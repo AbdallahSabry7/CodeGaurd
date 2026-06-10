@@ -1,6 +1,0 @@
-# The eval harness core uses ONLY the Python standard library (3.9+).
-# No third-party packages are required to run `python run_all.py`.
-#
-# Optional, only if you wire your real pipeline / baseline:
-#   - your CodeGuard app's own requirements (LangGraph, pydantic, etc.)
-#   - an LLM key (OPENROUTER_API_KEY or GROQ_API_KEY) for the real baseline

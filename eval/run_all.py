@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """One command to evaluate every part of CodeGuard against its baseline.
 
 Usage (from the eval/ folder):
@@ -29,6 +28,7 @@ from tasks import (  # noqa: E402
     eval_solid,
     eval_clean_code,
     eval_refactor,
+    eval_clean_code_metrics
 )
 from ablation import run_ablation  # noqa: E402
 
@@ -59,6 +59,8 @@ def main() -> int:
     results["clean_code"] = eval_clean_code.run()
     print("[5/5] refactoring + behavioral gate ...")
     results["refactor"] = eval_refactor.run()
+    print("[5/6] clean code tool metrics ...")
+    results["clean_code_metrics"] = eval_clean_code_metrics.run()
 
     print("[ablation] aggregating ...")
     run_ablation.run(precomputed=results)

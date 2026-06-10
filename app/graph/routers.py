@@ -61,6 +61,17 @@ def route_after_architect(state):
 		return "convergence"
 	return "refactor" if not state.get("refactored_code") else "convergence"
 
+def architect_gate(state):
+	"""First pass only: reuse a pre-seeded Alt+Enter SOLID opinion instead of re-running the Architect (so the SOLID card and Optimize agree). Otherwise run the Architect normally."""
+	first_pass = not state.get("refactor_iterations") and not state.get("refactored_code")
+	seeded = state.get("architect_report") is not None
+	is_python = (state.get("source_language") or "").lower() == "python"
+	if first_pass and seeded and is_python:
+		if state.get("architect_verdict") == "HALT_PERFECT_ENOUGH":
+			return "convergence"
+		return "refactor"
+	return "architect"
+
 def convergence_router(state: AgentState) -> str:
 	if state.get("architect_verdict") == "HALT_PERFECT_ENOUGH":
 		return "finalize"

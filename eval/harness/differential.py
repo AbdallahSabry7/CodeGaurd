@@ -1,67 +1,69 @@
-"""A self-contained differential behavior checker (mirrors CodeGuard's gate).
+"""Differential behavior checking, backed by the isolated executor + oracle.
 
-Given original + candidate source and a list of {args, expects} cases, it:
-  - runs the candidate's `entry` function on each case and records the observation
-    (return value OR exception type name),
-  - compares candidate-vs-gold (test-pass) AND candidate-vs-original (behavior
-    preserved),
-  - returns a verdict: preserved / changed / unverified.
+`check()` keeps the original return keys for backward compatibility, but now:
+  * compares candidate-vs-original on SEED + GENERATED inputs (not seed only),
+  * runs each side in a separate process with a timeout (infinite loop ->
+    'changed', never a hang),
+  * keeps test-pass (vs declared gold) and behavior-preserved (vs original)
+    strictly separate.
 
-Execution is in-process with a restricted namespace. This is a smoke test, not a
-sandbox — only run code you trust (your own datasets). For untrusted code, route
-through your Docker executor instead.
+`compare()` is the low-level primitive reused by the gate stress test: it
+returns a per-input match list so callers can derive a verdict at any input
+budget (seed-only vs +k generated) from a single pair of executions.
 """
 from __future__ import annotations
 
-import traceback
-from typing import Any
+from .executor import observe_many, signature
+from .oracle import build_input_set
 
 
-def _observe(code: str, entry: str, args: list) -> tuple[str, Any]:
-    """Return ('ok', value) or ('exc', ExceptionTypeName)."""
-    ns: dict = {}
-    try:
-        exec(compile(code, "<cand>", "exec"), ns)
-        fn = ns.get(entry)
-        if fn is None:
-            return ("exc", "MissingEntry")
-        val = fn(*args)
-        return ("ok", val)
-    except Exception as exc:  # noqa: BLE001 - we intentionally capture all
-        return ("exc", type(exc).__name__)
+def compare(original: str, candidate: str, entry: str, all_args: list, timeout: float = 5.0):
+    """Return (matches: list[bool], orig_runnable: int) across `all_args`."""
+    o = observe_many(original, entry, all_args, timeout)
+    c = observe_many(candidate, entry, all_args, timeout)
+    matches = [signature(o[i]) == signature(c[i]) for i in range(len(all_args))]
+    orig_runnable = sum(1 for ob in o if ob.get("status") in ("ok", "exc"))
+    return matches, orig_runnable
 
 
-def check(original: str, candidate: str, entry: str, cases: list[dict]) -> dict:
+def verdict_from(matches_subset: list, orig_runnable: int) -> str:
+    if orig_runnable == 0:
+        return "unverified"
+    return "preserved" if all(matches_subset) else "changed"
+
+
+def check(original: str, candidate: str, entry: str, cases: list[dict],
+          n_generated: int = 30, timeout: float = 5.0) -> dict:
+    seed_args, gen_args = build_input_set(cases, n_generated)
+    all_args = seed_args + gen_args
+    n_seed = len(seed_args)
+
+    o = observe_many(original, entry, all_args, timeout)
+    c = observe_many(candidate, entry, all_args, timeout)
+
+    gold_reprs = [repr(case.get("expects")) for case in cases]
     test_pass = 0
-    behavior_preserved = True
-    any_ran = False
-    details = []
-    for case in cases:
-        args = case.get("args", [])
-        gold = case.get("expects")
-        o_kind, o_val = _observe(original, entry, args)
-        c_kind, c_val = _observe(candidate, entry, args)
-        if o_kind == "ok":
-            any_ran = True
-        # test-pass: candidate matches the declared gold
-        passed = (c_kind == "ok" and c_val == gold)
-        test_pass += int(passed)
-        # behavior preserved: candidate matches the ORIGINAL on the same input
-        same = (o_kind == c_kind) and (o_val == c_val if o_kind == "ok" else True)
-        if not same:
-            behavior_preserved = False
-        details.append({"args": args, "orig": [o_kind, o_val], "cand": [c_kind, c_val], "passed": passed, "same": same})
+    for i in range(n_seed):
+        if c[i].get("status") == "ok" and c[i].get("value_repr") == gold_reprs[i]:
+            test_pass += 1
 
-    if not any_ran:
-        verdict = "unverified"
-    elif behavior_preserved:
-        verdict = "preserved"
-    else:
-        verdict = "changed"
+    matches = [signature(o[i]) == signature(c[i]) for i in range(len(all_args))]
+    orig_runnable = sum(1 for ob in o if ob.get("status") in ("ok", "exc"))
+    mismatches = matches.count(False)
+    first_div = None
+    for i, ok in enumerate(matches):
+        if not ok:
+            first_div = {"args": all_args[i],
+                         "orig": signature(o[i]), "cand": signature(c[i])}
+            break
+
+    verdict = verdict_from(matches, orig_runnable)
     return {
         "verdict": verdict,
         "test_pass": test_pass,
-        "n_cases": len(cases),
-        "behavior_preserved": behavior_preserved,
-        "details": details,
+        "n_cases": n_seed,
+        "behavior_preserved": verdict == "preserved",
+        "checked_inputs": len(all_args),
+        "mismatches": mismatches,
+        "first_divergence": first_div,
     }

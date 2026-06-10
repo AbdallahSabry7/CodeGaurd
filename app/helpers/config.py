@@ -1,3 +1,5 @@
+from pathlib import Path
+
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 class Settings(BaseSettings):
@@ -10,17 +12,18 @@ class Settings(BaseSettings):
 
     # optional / defaulted
     LANGSMITH_API_KEY: str = ""
-    LANGCHAIN_TRACING_V2: str = "false"
+    LANGCHAIN_TRACING_V2: str = "true"
     LANGCHAIN_ENDPOINT: str = "https://api.smith.langchain.com"
-    LANGCHAIN_PROJECT: str = "CodeGuard"
+    LANGCHAIN_PROJECT: str = "code_analysis_refactor"
     model4: str = ""
     max_iterations: int = 3
     max_improvement_loops: int = 3
     min_gain: float = 0.05
 
-    openai_api_base: str = "https://openrouter.ai/api/v1"
+    #model_config = SettingsConfigDict(env_file=Path(__file__).resolve().parent.parent.parent.parent / ".env", extra="ignore")
 
     model_config = SettingsConfigDict(env_file=".env")
 
 def get_settings():
     return Settings()
+    

@@ -5,7 +5,7 @@ import ast
 from schemas import AgentState
 from agents import refactor_agent, translate_from_python , translate_to_python , architect_agent , characterize_node , report_agent
 from tools import analysis_tool, execute_code_tool
-from .routers import syntax_check_router, executer_router, main_router , translator_router , syntax_check_router2 , route_after_architect , convergence_router , regression_router
+from .routers import syntax_check_router, executer_router, main_router , translator_router , syntax_check_router2 , route_after_architect , convergence_router , regression_router , architect_gate
 from .nodes import validate_refactored_code,validate_translator_code , analyzer_function, executer_function, detect_language , convergence_node , regression_check_node , destroy_last_node
 
 def build_graph():
@@ -57,7 +57,15 @@ def build_graph():
 
     graph.add_edge("characterize", "analyzer")
 
-    graph.add_edge("analyzer", "architect")
+    graph.add_conditional_edges(
+        "analyzer",
+        architect_gate,
+        {
+            "architect": "architect",
+            "refactor": "Refactor Agent",
+            "convergence": "Convergence Node",
+        },
+    )
 
     graph.add_conditional_edges(
         "architect",
